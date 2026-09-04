@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 
 import backend.server_core.config_core as config_core
 from backend.server_core import credential_crypto
+from backend.server_core import db_backend
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +56,14 @@ class NyxStrikeDB:
 
   # ── Connection ──────────────────────────────────────────────────────────────
 
-  def _connect(self) -> sqlite3.Connection:
-    conn = sqlite3.connect(self._db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.commit()
+  def _connect(self) -> Any:
+    # Backend is pluggable: SQLite by default (single file, local dev/build) or
+    # PostgreSQL for the cyber-range Kubernetes deployment, selected via
+    # NYXSTRIKE_DB_BACKEND / DATABASE_URL. See backend/server_core/db_backend.py.
+    # The returned object is sqlite3.Connection-compatible for the surface used
+    # in this module, so every query and migration below is byte-for-byte
+    # identical on both backends.
+    conn = db_backend.connect(self._db_path)
     logger.debug("db: opened %s", self._db_path)
     return conn
 

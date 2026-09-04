@@ -43,6 +43,12 @@ big = [
     "kube-hunter>=0.6.8",
     "shodan>=1.31.0",
 ]
+# Postgres backend for the cyber-range Kubernetes deployment (backend/server_core/
+# db_backend.py). Not needed for the default SQLite backend — install with
+# `uv sync --extra postgres` / `pip install '.[postgres]'` only in-cluster.
+postgres = [
+    "psycopg[binary]>=3.1.0,<4.0.0",
+]
 
 [dependency-groups]
 dev = [

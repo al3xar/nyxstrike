@@ -39,6 +39,13 @@ def run_mcp(args, logger):
         mcp = setup_mcp_server(api_client, logger, compact=args.compact, profiles=args.profile)
         logger.info("🚀 MCP server ready")
 
+        # HTTP transport: serve MCP over the network (e.g. a Kubernetes sidecar
+        # the agent reaches by URL). Default remains stdio (subprocess MCP).
+        if getattr(args, "transport", "stdio") == "http":
+            logger.info(f"🌐 Serving MCP over HTTP at http://{args.mcp_host}:{args.mcp_port}/mcp")
+            mcp.run(transport="http", host=args.mcp_host, port=args.mcp_port, show_banner=False)
+            return
+
         # stdio fallback for MCP clients that don't support the run() method
         try:
             mcp.run(show_banner=False)

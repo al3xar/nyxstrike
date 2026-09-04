@@ -59,6 +59,12 @@ def optional_bearer_auth():
     if not API_TOKEN:
         return
 
+    # Liveness/readiness probes (e.g. the Kubernetes kubelet) cannot carry a
+    # bearer token, so the health endpoints stay reachable without auth. They
+    # expose only liveness + tool availability + version/uptime.
+    if request.path in ("/ping", "/health"):
+        return
+
     auth_header = request.headers.get("Authorization", "")
     prefix = "Bearer "
 

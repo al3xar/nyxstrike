@@ -31,6 +31,9 @@ _tool_availability_lock = threading.Lock()
 _tool_availability_last_refresh: float = 0.0
 _tool_availability_refresh_in_progress = False
 
+# Process start time, for the /health uptime field.
+_SERVER_START_TIME: float = time.time()
+
 # Plugin tools registered at runtime.
 # Maps mcp_tool_name -> { type, binary, install } from plugin.yaml check block.
 # _get_tool_availability() probes each entry and overlays the result.
@@ -207,6 +210,45 @@ def _get_plugin_install_hints() -> Dict[str, str]:
         for name, check in _plugin_tools.items()
         if check.get("install")
     }
+
+@api_system_monitoring_bp.route("/health", methods=["GET"])
+def health_check():
+    """Health check endpoint with comprehensive tool detection.
+
+    Restored for the 1.9.0 layout: this route existed upstream through 1.5.0 but
+    was dropped in the folder restructure, while api_client.check_health() and
+    tests/test_endpoints_exist.py still rely on it. The cyber-range Kubernetes
+    readiness probe uses it to gate traffic on essential-tool availability; it is
+    left unauthenticated (see optional_bearer_auth in nyxstrike_server.py) so the
+    kubelet can reach it without a bearer token.
+    """
+    tools_status = _get_tool_availability()
+
+    essential_tools = HEALTH_TOOL_CATEGORIES.get("essential", [])
+    all_essential_tools_available = all(tools_status.get(t, False) for t in essential_tools)
+
+    category_stats = {
+        cat: {
+            "total": len(tools),
+            "available": sum(1 for t in tools if tools_status.get(t, False)),
+        }
+        for cat, tools in HEALTH_TOOL_CATEGORIES.items()
+    }
+
+    return jsonify({
+        "status": "healthy",
+        "message": "NyxStrike Tools API Server is operational",
+        "version": config_core.get("VERSION", "unknown"),
+        "tools_status": tools_status,
+        "all_essential_tools_available": all_essential_tools_available,
+        "total_tools_available": sum(1 for available in tools_status.values() if available),
+        "total_tools_count": len(tools_status),
+        "category_stats": category_stats,
+        "plugin_install_hints": _get_plugin_install_hints(),
+        "uptime": round(time.time() - _SERVER_START_TIME, 1),
+        "tool_availability_age_seconds": round(time.time() - _tool_availability_last_refresh, 1),
+    })
+
 
 @api_system_monitoring_bp.route("/ping", methods=["GET"])
 def ping():

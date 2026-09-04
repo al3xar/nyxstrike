@@ -14,4 +14,12 @@ def parse_args():
     parser.add_argument("--auth-token", type=str, default="",
                         help="Bearer token for authentication with the API server")
     parser.add_argument("--disable-ssl-verify", action="store_true", help="Disable SSL certificate verification when connecting to the API server in front of reverse proxies")
+    # Transport: stdio (default, subprocess MCP) or http (serve MCP over the
+    # network, e.g. a Kubernetes sidecar the agent connects to via URL).
+    parser.add_argument("--transport", type=str, default="stdio", choices=["stdio", "http"],
+                        help="MCP transport (default: stdio). Use 'http' to serve MCP over the network (sidecar mode).")
+    parser.add_argument("--mcp-host", type=str, default="127.0.0.1",
+                        help="Bind host for --transport http (default: 127.0.0.1; use 0.0.0.0 in a container)")
+    parser.add_argument("--mcp-port", type=int, default=9000,
+                        help="Bind port for --transport http (default: 9000)")
     return parser.parse_args()

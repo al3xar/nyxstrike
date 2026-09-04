@@ -1,0 +1,33 @@
+name: CI
+
+# Replaces the previous GitLab CI (.gitlab-ci.yml) after the move to
+# github.com/al3xar/nyxstrike. Runs the pytest suite with uv on Linux (the lock
+# targets sys_platform == 'linux').
+
+on:
+  push:
+    branches: [master, main, "feature/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests (uv + pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # Base deps + the Postgres backend driver (backend/server_core/db_backend.py)
+      # + dev group (pytest). The optional 'tools' extra installs the runtime
+      # security tools and is NOT needed to run the suite: the tests exercise
+      # routes/handlers and the tool catalog, not the external tools themselves.
+      - name: Sync dependencies
+        run: uv sync --frozen --extra postgres --group dev
+
+      - name: Run tests
+        run: uv run pytest -q

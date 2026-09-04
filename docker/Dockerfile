@@ -34,6 +34,13 @@ RUN apt-get update -qq && \
     bash nyxstrike.sh -t && \
     rm -rf /var/lib/apt/lists/*
 
+# Add the Postgres backend driver so the image can run against the in-cluster
+# Postgres (NYXSTRIKE_DB_BACKEND=postgres, DATABASE_URL=postgres://...). This is
+# a no-op for the default SQLite backend. Reconciles the venv to base + tools +
+# postgres from the pinned lock.
+RUN UV_PROJECT_ENVIRONMENT=/opt/nyxstrike/nyxstrike-env \
+    uv sync --frozen --extra tools --extra postgres
+
 # ── Runtime config ─────────────────────────────────────────────────────────────
 # Bind to 0.0.0.0 inside the container so the mapped port is reachable
 ENV NYXSTRIKE_HOST=0.0.0.0

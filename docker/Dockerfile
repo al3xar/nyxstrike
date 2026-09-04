@@ -38,8 +38,17 @@ RUN apt-get update -qq && \
 # Postgres (NYXSTRIKE_DB_BACKEND=postgres, DATABASE_URL=postgres://...). This is
 # a no-op for the default SQLite backend. Reconciles the venv to base + tools +
 # postgres from the pinned lock.
-RUN UV_PROJECT_ENVIRONMENT=/opt/nyxstrike/nyxstrike-env \
+# NOTE: docker-entrypoint.sh resolves ROOT_DIR to the docker/ dir (where it
+# lives) and execs `${ROOT_DIR}/nyxstrike-env/bin/python3` +
+# `${ROOT_DIR}/nyxstrike_server.py`. So the venv AND the server must live under
+# docker/ for the entrypoint to find them. (Previously the venv was built at
+# /opt/nyxstrike/nyxstrike-env -> "No such file or directory" on every image.)
+RUN UV_PROJECT_ENVIRONMENT=/opt/nyxstrike/docker/nyxstrike-env \
     uv sync --frozen --extra tools --extra postgres
+
+# Copy the runtime entrypoint target into docker/ so ROOT_DIR-relative lookup works.
+RUN cp -f /opt/nyxstrike/nyxstrike_server.py /opt/nyxstrike/docker/nyxstrike_server.py \
+    && cp -f /opt/nyxstrike/nyxstrike.sh /opt/nyxstrike/docker/nyxstrike.sh
 
 # ── Runtime config ─────────────────────────────────────────────────────────────
 # Bind to 0.0.0.0 inside the container so the mapped port is reachable

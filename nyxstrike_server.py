@@ -65,6 +65,16 @@ def optional_bearer_auth():
     if request.path in ("/ping", "/health"):
         return
 
+    # The SPA shell must load WITHOUT a token so the client-side TokenGate can
+    # prompt the user for NYXSTRIKE_API_TOKEN. "/" serves index.html, /assets/*
+    # serves the JS/CSS bundle, and the catch-all re-serves index.html for any
+    # non-API path. Without this exemption the 401 on "/" means the token-entry
+    # box never renders — the user literally cannot reach a field to type the key.
+    # Every real data endpoint lives under /api/ (plus /web-dashboard*), and those
+    # stay fully authenticated below, so no data is exposed.
+    if request.method == "GET" and not request.path.startswith(("/api/", "/web-dashboard")):
+        return
+
     auth_header = request.headers.get("Authorization", "")
     prefix = "Bearer "
 

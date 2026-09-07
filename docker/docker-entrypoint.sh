@@ -15,6 +15,14 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# nyxstrike_server.py imports `backend.*` (and `config`, `tool_registry`, etc.)
+# as top-level modules living at the repo root. It runs from docker/ so Python
+# only puts docker/ on sys.path; add the repo root so `import backend` resolves.
+# (The project is `package = false` in pyproject.toml, so it is never installed
+# into the venv — it must be importable from the source tree.)
+REPO_ROOT="$(cd "${ROOT_DIR}/.." && pwd)"
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
 SETUP_FLAGS=()
 
 if [[ -n "${NYX_AI:-}" ]]; then

@@ -148,6 +148,12 @@ TOOL_PROFILES = {
         lambda mcp, client, logger: register_toolspec_category(mcp, client, logger, "web_probe"),
     ],
 
+    #Tools for automated browser interaction via Jev (fast executor, HTTP-backed
+    #against JEV_URL) — subgoal runs, cheap surface recon, and evidence retrieval.
+    "web_interaction": [
+        lambda mcp, client, logger: register_toolspec_category(mcp, client, logger, "web_interaction"),
+    ],
+
     #Tools for vulnerability scanning and assessment (e.g., Nuclei).
     "vuln_scan": [
         lambda mcp, client, logger: register_toolspec_category(mcp, client, logger, "vuln_scan"),
@@ -326,3 +332,54 @@ DEFAULT_PROFILE = [
 
 # Full profile includes all available tool categories
 FULL_PROFILE = list(TOOL_PROFILES.keys())
+
+# Cyber-range profile: the tool set Hades (the red-team operator persona)
+# drives through the NyxStrike MCP bridge in the cyber-range deployment.
+# Curated for the PTES/OWASP attack chain — host/service discovery ->
+# enumeration -> web exploitation -> foothold -> post-exploitation ->
+# reporting — and tuned for a self-contained internal network segment.
+# It is a focused superset of DEFAULT_PROFILE (adds binary/memory forensics
+# and the AI payload-generation tools Hades uses to chain findings) and
+# omits the noisy/generic categories that slow a focused audit.
+#
+# This is a NAMED aggregate profile (like DEFAULT_PROFILE / FULL_PROFILE);
+# it is NOT a key in TOOL_PROFILES, so FULL_PROFILE is unaffected and no
+# other profile breaks. Register it in server_setup.py so `--profile
+# cyber-range` resolves to this list.
+CYBER_RANGE_PROFILE = [
+    # --- Host + service discovery (attack chain stage 1) ---
+    "net_scan",
+    "net_lookup",
+    "dns_enum",
+    "smb_enum",
+    "recon",
+    "recon_bot",
+    # --- Service / surface enumeration (stage 2) ---
+    "web_probe",
+    "web_crawl",
+    "web_fuzz",
+    "web_scan",
+    "vuln_scan",
+    "api_audit",          # pulls in api_fuzz + api_scan via PROFILE_DEPENDENCIES
+    # --- Automated browser interaction via Jev (T-6; HTTP-backed vs JEV_URL) ---
+    "web_interaction",
+    # --- Exploitation (stages 3-4) ---
+    "exploit_framework",
+    "password_cracking",
+    "param_discovery",
+    "url_recon",
+    # --- Post-exploitation (stage 5) ---
+    "credential_harvest",
+    "memory_forensics",
+    "binary_analysis",
+    "binary_debug",
+    # --- Chaining / reporting (stage 6) ---
+    "ai_payload",
+    "ai_assist",
+    "vuln_intel",
+    "visual",
+    # --- Platform + reliability ---
+    "monitoring",
+    "process_management",
+    "error_handling",
+]

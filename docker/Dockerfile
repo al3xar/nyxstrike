@@ -60,4 +60,18 @@ EXPOSE 8888
 # ── Entrypoint ─────────────────────────────────────────────────────────────────
 RUN chmod +x docker/docker-entrypoint.sh
 
+# ── Slim: drop build-only toolchains & caches ──────────────────────────────────
+# All security tools are pre-compiled during `nyxstrike.sh -t` above; the
+# runtime only execs them (subprocess), never builds. The entrypoint only runs
+# `nyxstrike.sh` when NYX_AI/NYX_AI_SMALL/NYX_EXTRA_FLAGS are set, which the
+# cyber-range deploy does not. Saves ~2.6GB unpacked (gcc/g++/mingw/llvm/clang,
+# rustup toolchain, uv/cargo caches, locales/docs). Rust/go *binaries* live in
+# /root/.cargo/bin and /root/go/bin (real ELF, not shims) and are untouched.
+RUN apt-get -y -qq remove --purge \
+        'gcc*' 'g++*' '*mingw*' 'clang*' 'llvm*' build-essential dpkg-dev \
+    && apt-get -y -qq autoremove --purge \
+    && rm -rf /root/.rustup /root/.cargo/registry /root/.cache \
+              /usr/share/locale /usr/share/doc /usr/share/man \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 ENTRYPOINT ["/opt/nyxstrike/docker/docker-entrypoint.sh"]

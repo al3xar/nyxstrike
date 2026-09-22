@@ -800,6 +800,56 @@ def build_tool_catalog() -> Dict[str, ToolSpec]:
             tech_affinities=set(),
             noise_score=0.10,
         ),
+        # ------------------------------------------------------------------
+        # RAMA WEB (Jev, T-14): the web_interaction toolspec (T-6) is
+        # HTTP-backed vs JEV_URL. It now ALSO lives in the decision-engine
+        # catalog so chain_report tags the Jev step grounded (tactic +
+        # technique) — without these entries the T-8 capability maps were
+        # unreachable for the Jev step (wiring GAP, mapeo-paso-attck.md §10.4).
+        # Capabilities are exactly T-8's 5 web capabilities (MITRE v19
+        # canonical); the deterministic resolver returns the first sorted
+        # match, so web_run_goal resolves Execution/T1059 (command-injection)
+        # — matching T-8's offline verification.
+        # ------------------------------------------------------------------
+        "web_run_goal": ToolSpec(
+            name="web_run_goal",
+            capabilities={
+                "web-exploitation",
+                "credential-form",
+                "valid-accounts",
+                "command-injection",
+                "xss",
+            },
+            target_types={
+                TargetType.WEB_APPLICATION.value,
+                TargetType.API_ENDPOINT.value,
+            },
+            objectives={"comprehensive", "exploitation"},
+            tech_affinities=set(),
+            noise_score=0.5,
+        ),
+        "web_extract_surface": ToolSpec(
+            name="web_extract_surface",
+            capabilities={"web_fingerprint"},
+            target_types={
+                TargetType.WEB_APPLICATION.value,
+                TargetType.API_ENDPOINT.value,
+            },
+            objectives={"comprehensive", "reconnaissance"},
+            tech_affinities=set(),
+            noise_score=0.2,
+        ),
+        "web_get_evidence": ToolSpec(
+            name="web_get_evidence",
+            capabilities={"forensics"},
+            target_types={
+                TargetType.WEB_APPLICATION.value,
+                TargetType.API_ENDPOINT.value,
+            },
+            objectives={"comprehensive", "intelligence"},
+            tech_affinities=set(),
+            noise_score=0.1,
+        ),
     }
 
 

@@ -67,7 +67,8 @@ RUN chmod +x docker/docker-entrypoint.sh
 # cyber-range deploy does not. Saves ~2.6GB unpacked (gcc/g++/mingw/llvm/clang,
 # rustup toolchain, uv/cargo caches, locales/docs). Rust/go *binaries* live in
 # /root/.cargo/bin and /root/go/bin (real ELF, not shims) and are untouched.
-RUN apt-get update -qq \
+RUN rm -f /etc/apt/sources.list.d/trivy* \
+    && (apt-get update -qq || true) \
     && for pkg in build-essential gcc g++ clang-21 clang-tools-21 llvm-21 \
                  gcc-mingw-w64-i686-win32 gcc-mingw-w64-x86-64-win32 \
                  binutils-mingw-w64-i686 binutils-mingw-w64-x86-64 dpkg-dev; do \

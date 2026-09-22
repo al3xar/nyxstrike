@@ -399,6 +399,238 @@ def _interpret_web_result(exec_result: Any) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Post-execution result categorizer (colocación "d" — ADR router-decision
+# indexado §3(d)).
+#
+# Every executed step yields an envelope of the form
+#   {stdout, stderr, return_code, success, timed_out, partial_results, ...}
+# (see enhanced_command_executor / _trim_result). Before that result goes back
+# to the LLM supervisor (Hades) we attach ONE actionable label so the planner
+# reads the *already categorised* fact (cheaper context, cheaper decision):
+#
+#   open_ports / services_enumerated / creds_found / vuln_confirmed /
+#   empty / error / blocked / unlabeled
+#
+# Grounding rules (the whole point of "d"):
+#   * DETERMINISTIC over the trimmed stdout/stderr/return_code — same input,
+#     same label, no model in the loop (level 0 of the hybrid cascade).
+#   * NEVER invent a label: an unrecognized capability/output is "unlabeled".
+#   * The label is ADDED to — never substituted for — the trimmed stdout, so
+#     the LLM always still sees the raw signal (the label must not hide it).
+#   * It feeds chain_report (tactic/technique hop) and the Wazuh correlation
+#     surface (T-11) via the same step dict.
+#
+# Design decision (Al3xar 2026-09-22 comment on this card): the *optional*
+# level-1 fallback is a single Jev call, kept light, fused with the T-17
+# decision call when possible — it is NOT a local model. Crucially the ADR
+# (T-16) keeps Jev OFF the production dependency path (closed API + recon
+# egress to a third party), and the acceptance criteria here require a
+# deterministic, same-input-same-label guarantee on fixtures. So the shipped
+# core is the deterministic level-0 classifier (below); the model/Jev fallback
+# is an OPT-IN, injectable hook on the controller that only ever *overrides*
+# an "unlabeled" verdict with a label the model itself grounds — it can never
+# fabricate one, and it is a no-op unless explicitly wired. That preserves the
+# deterministic contract while leaving the door open for the T-17/T-24 fusion.
+# ---------------------------------------------------------------------------
+
+RESULT_CATEGORIES: tuple = (
+    "open_ports",
+    "services_enumerated",
+    "creds_found",
+    "vuln_confirmed",
+    "empty",
+    "error",
+    "blocked",
+    "unlabeled",
+)
+
+# Phrases that mark a HARD stop in the output itself (the run was refused or
+# halted, not a plain tool failure). Checked before success/error so a
+# "blocked by policy" run is labelled "blocked", not "error".
+_BLOCKED_MARKERS: tuple = (
+    "out_of_scope",
+    "out of scope",
+    "budget_exceeded",
+    "budget exceeded",
+    "scope violation",
+    "forbidden by policy",
+    "blocked by policy",
+    "not in scope",
+    "exceeds budget",
+)
+
+# Credential-success signals. Kept high-specificity so a generic "password"
+# word in help text does not fire: an account must be paired with a success
+# phrase, OR a full credential line (user:pass) must be present.
+_CRED_SUCCESS_MARKERS: tuple = (
+    "successfully",
+    "login successful",
+    "password for",
+    "password is",
+    "valid credentials",
+    "accepted",
+)
+_CRED_LINE_RE = re.compile(r"\b[\w.@+-]+:([\w!@#$%^&*-]{3,})\b")
+
+# Vulnerability-confirmation signals: a CVE id, or a tool naming a confirmed
+# finding. "vulnerable" alone is too broad; we require a finding keyword.
+_VULN_MARKERS: tuple = (
+    "vulnerabilit",   # vulnerability / vulnerabilities (es + en)
+    "cve-",
+    "exploit",
+    "injection",
+    "xss",
+    "sqlmap",
+    "found a",
+    "detected",
+    "is vulnerable",
+)
+
+# Service-enumeration signals (beyond the open-port line): a service/version
+# probe result.
+_SERVICE_MARKERS: tuple = (
+    "service",
+    "version",
+    "software",
+    "fingerprint",
+    "running on",
+    "open port",
+    "port scan",
+)
+
+# Open-port line: nmap / rustscan / masscan "PORT <n>/<proto> ... open".
+_OPEN_PORT_RE = re.compile(r"\b\d{1,5}/(tcp|udp|sctp)\b.*\bopen\b", re.IGNORECASE)
+# An explicit "N open ports" summary line.
+_OPEN_PORTS_SUMMARY_RE = re.compile(r"\bopen ports?\b", re.IGNORECASE)
+
+
+def _looks_blocked(text: str) -> bool:
+    low = text.lower()
+    return any(m in low for m in _BLOCKED_MARKERS)
+
+
+def _looks_like_error(result: Dict[str, Any]) -> bool:
+    """Hard-failure detection, grounded in the executor's own envelope."""
+    if result.get("success") is False:
+        return True
+    try:
+        rc = int(result.get("return_code", 0) or 0)
+    except (TypeError, ValueError):
+        rc = 0
+    if rc < 0:
+        return True  # -1 is the executor's "exception" code, not "non-zero"
+    if result.get("timed_out"):
+        return True
+    return False
+
+
+def _is_substantive(stdout: str, stderr: str) -> bool:
+    """True when there is real output to categorise (not a bare banner)."""
+    out = (stdout or "").strip()
+    err = (stderr or "").strip()
+    if out or err:
+        return True
+    return False
+
+
+def _classify_deterministic(tool: str, result: Dict[str, Any]) -> str:
+    """Deterministic level-0 categorizer. Same (tool, result) -> same label."""
+    tool_l = (tool or "").lower()
+    stdout = str(result.get("stdout", "") or "")
+    stderr = str(result.get("stderr", "") or "")
+    text = f"{stdout}\n{stderr}"
+    low = text.lower()
+
+    # 1) Hard stop / policy block wins over everything (a blocked run is not
+    #    a tool error, and the planner must see it as "blocked").
+    if _looks_blocked(text) or _looks_blocked(str(result.get("error", "") or "")):
+        return "blocked"
+
+    # 2) Credentials (highest value signal): a credential-brute tool that
+    #    reports a login, or any full user:pass credential line.
+    is_cracker = tool_l in (
+        "hydra", "medusa", "mkcert", "crowbar", "ncrack", "john", "hashcat",
+    ) or "hydra" in tool_l or "crack" in tool_l or "brute" in tool_l
+    if is_cracker and any(m in low for m in _CRED_SUCCESS_MARKERS):
+        return "creds_found"
+    if _CRED_LINE_RE.search(stdout):
+        # A literal credential line anywhere -> creds_found (grounded).
+        return "creds_found"
+
+    # 3) Vulnerability confirmation: a CVE id or a named finding.
+    if any(m in low for m in _VULN_MARKERS):
+        return "vuln_confirmed"
+
+    # 4) Open ports: a PORT n/proto open line, or an "open ports" summary.
+    if _OPEN_PORT_RE.search(stdout) or _OPEN_PORTS_SUMMARY_RE.search(low):
+        return "open_ports"
+
+    # 5) Service enumeration: service/version fingerprint output.
+    if any(m in low for m in _SERVICE_MARKERS):
+        return "services_enumerated"
+
+    # 6) Failure / error / timeout (no positive signal above).
+    if _looks_like_error(result) or _looks_blocked(stderr):
+        return "error"
+
+    # 7) Empty: a clean run that produced nothing to act on.
+    if not _is_substantive(stdout, stderr):
+        return "empty"
+
+    # 8) Nothing recognised -> honest "unlabeled" (grounded; never invented).
+    return "unlabeled"
+
+
+def _classify_with_model(tool: str, result: Dict[str, Any], classifier) -> str:
+    """Opt-in level-1 model/Jev fallback.
+
+    ``classifier(tool, trimmed_result_dict) -> str`` is expected to return one
+    of RESULT_CATEGORIES (case-insensitive) or "" / None when it cannot decide.
+    The returned label is only accepted if it is a KNOWN category and it is
+    not "unlabeled" (the model may override an "unlabeled" guess but never
+    fabricate a category that isn't in RESULT_CATEGORIES; anything else falls
+    back to "unlabeled"). No exception may escape — a model failure degrades
+    to "unlabeled", never to a crash.
+    """
+    if classifier is None:
+        return "unlabeled"
+    try:
+        label = classifier(tool, result)
+    except Exception as exc:  # noqa: BLE001 - model hook must never raise
+        logger.warning("result categorizer model hook failed for %r: %s", tool, exc)
+        return "unlabeled"
+    if not isinstance(label, str):
+        return "unlabeled"
+    label = label.strip().lower()
+    if label in RESULT_CATEGORIES and label != "unlabeled":
+        return label
+    return "unlabeled"
+
+
+def categorize_result(
+    tool: str,
+    result: Dict[str, Any],
+    classifier: Optional[Callable[[str, Dict[str, Any]], str]] = None,
+) -> str:
+    """Label an executed step's result with ONE actionable category.
+
+    Deterministic level-0 first. If the deterministic pass returns "unlabeled"
+    AND a ``classifier`` (model / Jev hook) is supplied, a single model call may
+    override it (level-1). A non-"unlabeled" deterministic verdict is final —
+    the model is never allowed to fight a grounded decision.
+
+    Returns a member of RESULT_CATEGORIES. Never raises.
+    """
+    if not isinstance(result, dict):
+        return "unlabeled"
+    label = _classify_deterministic(tool, result)
+    if label != "unlabeled" or classifier is None:
+        return label
+    return _classify_with_model(tool, result, classifier)
+
+
+# ---------------------------------------------------------------------------
 # Controller
 # ---------------------------------------------------------------------------
 
@@ -438,6 +670,13 @@ class PlanAndApproveController:
 
         self.executor = executor or _default_step_executor()
 
+        # T-19: optional level-1 result-classifier hook (model / Jev call,
+        # light — at most one categorisation per result, fusible with the
+        # T-17 decision call). Default None => the deterministic level-0
+        # categorizer alone decides (100% offline, deterministic). The hook
+        # may only override an "unlabeled" verdict; it can never fabricate a
+        # category (see categorize_result / _classify_with_model).
+        self.result_classifier = None
 
     # -- persistence helpers -------------------------------------------------
 
@@ -866,6 +1105,38 @@ class PlanAndApproveController:
         chosen["status"] = STATUS_EXECUTED if succeeded else STATUS_FAILED
         chosen["result"] = _trim_result(exec_result, web_interp)
 
+        # T-19 (colocación "d"): post-execution RESULT CATEGORIZER. Attach ONE
+        # actionable label (open_ports / services_enumerated / creds_found /
+        # vuln_confirmed / empty / error / blocked / unlabeled) so the LLM
+        # supervisor reads the already-categorised fact. Deterministic level-0
+        # over the trimmed signal; the opt-in model/Jev hook may only override
+        # an "unlabeled" verdict. The label is ADDED to, never substituted
+        # for, the trimmed stdout — raw signal is never hidden.
+        cat_input = exec_result
+        if web_interp is not None:
+            # The web branch speaks the compressed SubgoalResult contract
+            # (summary/blocked_reason, not stdout/stderr); feed those texts to
+            # the same deterministic pass so BLOCKED/BUDGET/out_of_scope read
+            # as "blocked" and a finding named in the summary reads as such.
+            cat_input = {
+                "success": bool(web_interp.get("success")),
+                "stdout": str(web_interp.get("summary") or ""),
+                "stderr": str(web_interp.get("blocked_reason") or ""),
+                "return_code": 0,
+                "timed_out": False,
+            }
+        result_category = categorize_result(
+            tool or chosen.get("tool", ""),
+            cat_input,
+            classifier=self.result_classifier,
+        )
+        chosen["result_category"] = result_category
+        # Attach the label to the stored result projection as well, so every
+        # reader of the step (chain_report / Wazuh correlation T-11) sees the
+        # category next to the trimmed stdout.
+        stored_result = chosen.get("result")
+        if isinstance(stored_result, dict):
+            stored_result["result_category"] = result_category
 
         # Record the run log for the evidence chain (grounded, hashable).
         _append_run_log(self.session_flow, session_id, {
@@ -875,6 +1146,7 @@ class PlanAndApproveController:
             "stdout": exec_result.get("stdout", ""),
             "stderr": exec_result.get("stderr", ""),
             "return_code": exec_result.get("return_code", 0),
+            "result_category": result_category,
             "timestamp": _now_iso(),
         })
 
@@ -886,9 +1158,16 @@ class PlanAndApproveController:
         self._persist(session)
 
         result = _trim_result(exec_result, web_interp)
+        # T-19: the label travels in the result dict the LLM reads (kept
+        # alongside the trimmed stdout — it annotates, never replaces).
+        result["result_category"] = result_category
         return {
             "success": succeeded,
             "session_id": session_id,
+            # T-19: the actionable category of this run's result travels with
+            # the response so the LLM supervisor decides off the label + the
+            # trimmed stdout (label alone is never a substitute for the signal).
+            "result_category": result_category,
             "executed_step": _step_public(chosen),
             "result": result,
             **({"fallback": result["fallback"]} if "fallback" in result else {}),
@@ -1565,6 +1844,11 @@ def _step_public(step: Dict[str, Any]) -> Dict[str, Any]:
         "selection_reason": step.get("selection_reason", {}),
         "status": step.get("status", STATUS_PROPOSED),
         "result": _trim_result(step.get("result")) if step.get("result") else None,
+        # T-19: post-execution actionable category (absent until the step ran).
+        # chain_report's step dict carries it for the planner + Wazuh
+        # correlation (T-11); grounded — only set from the categorizer.
+        **({"result_category": step["result_category"]}
+           if step.get("result_category") else {}),
     }
 
 
@@ -1647,6 +1931,12 @@ def _trim_result(result: Dict[str, Any], web_interp: Optional[Dict[str, Any]] = 
     for key in ("success", "return_code", "timed_out", "partial_results", "execution_time", "timestamp"):
         if key in result:
             out[key] = result[key]
+    # T-19: carry the actionable result category through the projection so it
+    # reaches both the planner's response result and the chain step re-read via
+    # _step_public (idempotent: re-projecting an already-trimmed result keeps
+    # the label).
+    if "result_category" in result and result["result_category"]:
+        out["result_category"] = result["result_category"]
     stdout = result.get("stdout", "")
     stderr = result.get("stderr", "")
     # Keep bounded; the full stdout lives in the session run_log.

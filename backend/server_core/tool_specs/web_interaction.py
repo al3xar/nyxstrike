@@ -45,6 +45,34 @@ def _jev_base_url() -> str:
 
 # --- response shaping -------------------------------------------------------
 
+def _run_goal_stdout(payload: dict, fallback_summary: str) -> str:
+    """The stdout a web_run_goal response carries into the evidence chain (T-9).
+
+    ``record_tool_run`` hashes whatever stdout holds, so it must name the Jev
+    ``run_id`` (the chain link for ``web_get_evidence``) and carry the contract's
+    ``summary``/``extracted`` (T-2). When the Jev service predates the compressed
+    contract (minimal payload: run_id/status/...) the fallback summary is used.
+    """
+    lines = []
+    run_id = payload.get("run_id") or ""
+    if run_id:
+        lines.append(f"run_id={run_id}")
+    lines.append(f"summary: {payload.get('summary') or fallback_summary}")
+    extracted = payload.get("extracted")
+    if isinstance(extracted, dict) and extracted:
+        lines.append("extracted=" + json.dumps(extracted, ensure_ascii=False, sort_keys=True))
+    status = payload.get("status")
+    if status:
+        lines.append(f"status={status}")
+    verified = payload.get("verified")
+    if isinstance(verified, bool):
+        lines.append(f"verified={'true' if verified else 'false'}")
+    evidence_hash = payload.get("evidence_hash")
+    if evidence_hash:
+        lines.append(f"evidence_hash={evidence_hash}")
+    return "\n".join(lines)
+
+
 def _success(payload: dict, summary: str, run_id: str = "") -> dict:
     """A successful proxy response in the evidence shape.
 
@@ -136,7 +164,13 @@ def _run_goal_handler(p: dict) -> dict:
     summary = f"run_goal {status or 'done'} for {goal} on {url} (session {session_id})"
     if payload.get("error"):
         summary += f" — error: {payload['error']}"
-    return _success(payload, summary, run_id=run_id)
+    return {
+        "success": True,
+        "stdout": _run_goal_stdout(payload, summary),
+        "stderr": "",
+        "return_code": 0,
+        **{k: v for k, v in payload.items() if k not in ("success",)},
+    }
 
 
 def _extract_surface_handler(p: dict) -> dict:
@@ -176,8 +210,40 @@ def _extract_surface_handler(p: dict) -> dict:
     return _success(payload, summary)
 
 
+def _find_chained_run(run_id: str) -> dict | None:
+    """Locate the tamper-evident chain entry for a Jev run_id (T-9).
+
+    ``record_tool_run`` captures the response of POST /api/tools/web_run_goal into
+    ``run_history``; its stdout names the Jev run_id (``run_id=jev-...``), which is
+    the only stable link between the Jev evidence store and the chain entry. The
+    lookup scans the store's window (bounded, newest-first) and never fabricates a
+    match — a run recorded after the window evicted returns None.
+    """
+    if not run_id:
+        return None
+    needle = f"run_id={run_id}"
+    try:
+        from backend.server_core.singletons import run_history
+
+        for entry in run_history.get_all():
+            if needle in str(entry.get("stdout", "")):
+                return entry
+    except Exception:
+        logger.debug("web_get_evidence: run_history lookup failed", exc_info=True)
+    return None
+
+
 def _get_evidence_handler(p: dict) -> dict:
-    """GET Jev /get_evidence/{run_id} — full trace + snapshot + evidence chain."""
+    """GET Jev /get_evidence/{run_id} — full trace + screenshots + chain hash.
+
+    Per the T-9 contract this endpoint is where the pieces that deliberately
+    NEVER travel in the compressed subgoal response (T-2) are exposed:
+      * ``trace``       — the full action history,
+      * ``screenshots`` — captured images (when ``screenshots=true`` was requested),
+      * ``hash`` / ``prev_hash`` — the tamper-evident chain entry that
+        ``record_tool_run`` recorded for this run (None when the entry is not in
+        the store's window — the run's own Jev digest stays in ``evidence_hash``).
+    """
     run_id = (p.get("run_id") or "").strip()
     if not run_id:
         raise ToolValidationError("run_id parameter is required")
@@ -201,11 +267,41 @@ def _get_evidence_handler(p: dict) -> dict:
         return _failure(resp.status_code, payload.get("detail", str(payload)), partial=payload)
 
     history = payload.get("history") or []
-    summary = (
-        f"evidence for run {run_id}: status={payload.get('status', '')}, "
-        f"{len(history)} recorded actions"
-    )
-    return _success(payload, summary, run_id=run_id)
+    screenshots = payload.get("screenshots") or []
+    entry = _find_chained_run(run_id)
+
+    body = {k: v for k, v in payload.items() if k not in ("success",)}
+    body["trace"] = history
+    body["screenshots"] = screenshots
+    if entry is not None:
+        body["hash"] = entry.get("hash")
+        body["prev_hash"] = entry.get("prev_hash")
+        body["evidence_found"] = True
+        stderr = ""
+    else:
+        body["hash"] = None
+        body["prev_hash"] = None
+        body["evidence_found"] = False
+        stderr = (
+            f"no matching chain entry in run_history for run {run_id} "
+            f"(evicted from the window, or JEV_URL was down when the run happened)"
+        )
+
+    stdout_lines = [f"run_id={run_id}"]
+    if entry is not None:
+        stdout_lines.append(f"hash={entry.get('hash', '')}")
+        stdout_lines.append(f"prev_hash={entry.get('prev_hash', '')}")
+    stdout_lines.append(f"trace={len(history)} actions")
+    stdout_lines.append(f"screenshots={len(screenshots)}")
+    if payload.get("evidence_hash"):
+        stdout_lines.append(f"evidence_hash={payload['evidence_hash']}")
+    return {
+        "success": True,
+        "stdout": "\n".join(stdout_lines),
+        "stderr": stderr,
+        "return_code": 0,
+        **body,
+    }
 
 
 # --- specs ------------------------------------------------------------------

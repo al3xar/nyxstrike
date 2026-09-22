@@ -1,23 +1,39 @@
 """
 tests/test_evidence_chain.py
 
-Pure-Python unit tests for the tamper-evident hash chain (server_core.evidence_chain),
+Unit tests for the tamper-evident hash chain (server_core.evidence_chain),
 plus the RunHistoryStore wiring that produces it (record() chaining + hash round-trip
-through _load()).
+through _load()), plus T-9: a Jev web run (``web_run_goal`` toolspec) landing in the
+same chain, and ``web_get_evidence`` exposing that entry's hash/prev_hash + trace +
+screenshots.
 
-No subprocess, no Flask, no server calls.
+The web-run sections use the real Flask app (conftest patches every subprocess path)
+with the Jev service ``requests`` calls monkey-patched and a scratch RunHistoryStore —
+no network, no paid APIs.
 """
 
-import pytest
+import json
+import os
+import sys
 
-from backend.server_core.evidence_chain import (
+import pytest
+from unittest.mock import MagicMock
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+import backend.server_core.singletons as singletons  # noqa: E402
+import backend.server_core.tool_specs.web_interaction as web_interaction  # noqa: E402
+import nyxstrike_server  # noqa: E402
+from backend.server_core.evidence_chain import (  # noqa: E402
     GENESIS_HASH,
     chain_entry,
     compute_hash,
     find_run_by_hash,
     verify_chain,
 )
-from backend.server_core.run_history_store import RunHistoryStore
+from backend.server_core.run_history_store import RunHistoryStore  # noqa: E402
 
 
 def _make_raw_entry(i: int) -> dict:
@@ -194,3 +210,229 @@ class TestRunHistoryStoreChaining:
         found = find_run_by_hash(store.get_all(), chained["hash"])
         assert found is not None
         assert found["session_id"] == ""
+
+
+# ---------------------------------------------------------------------------
+# T-9: a Jev web run (web_run_goal) lands in the same tamper-evident chain,
+# and web_get_evidence exposes that entry's hash/prev_hash + trace + screenshots.
+# ---------------------------------------------------------------------------
+
+def _jev_run_goal_response():
+    """A successful Jev /run_goal response: the compressed subgoal contract (T-2)
+    with the run identity fields."""
+    return {
+        "run_id": "jev-t9-0001",
+        "status": "done",
+        "session_id": "sess_t9",
+        "elapsed_ms": 7100,
+        "error": None,
+        "verified": True,
+        "summary": "DONE on 'obtain the flag' after 2 actions: TYPE_TEXT 1, CLICK 7.",
+        "extracted": {"reflected_text": "flag{t9}", "final_url": "https://range.invalid/flag", "forms_seen": 2},
+        "budget": {"actions_used": 2, "decisions_used": 3, "elapsed_ms": 7100},
+        "evidence_hash": "sha256:" + "a" * 64,
+        "attack_tactic": "Initial Access",
+        "blocked_reason": None,
+    }
+
+
+def _jev_get_evidence_response():
+    """The full evidence store record Jev's /get_evidence/{run_id} returns:
+    trace (history) + snapshot + screenshots — the pieces that deliberately
+    never travel in the compressed subgoal response (T-2)."""
+    return {
+        "run_id": "jev-t9-0001",
+        "session_id": "sess_t9",
+        "url": "https://range.invalid/login",
+        "goal": "obtain the flag",
+        "status": "done",
+        "error": None,
+        "elapsed_ms": 7100,
+        "history": [
+            {"step": 1, "action": "User name", "operation": "TYPE_TEXT", "target": "1", "url": "https://range.invalid/login"},
+            {"step": 2, "action": "Login", "operation": "CLICK", "target": "7", "url": "https://range.invalid/flag"},
+        ],
+        "snapshot": {"url": "https://range.invalid/flag", "title": "Flag", "text": "flag{t9}", "elements": []},
+        "evidence_hash": "sha256:" + "a" * 64,
+        "screenshots": [
+            {"index": 0, "step": None, "url": "https://range.invalid/login", "data_b64": "aW1hZ2U="},
+            {"index": 1, "step": 2, "url": "https://range.invalid/flag", "data_b64": "aW1hZ2U="},
+        ],
+        "max_actions": 40,
+        "max_decisions": 80,
+        "created_at": 1234567890.0,
+    }
+
+
+@pytest.fixture
+def web_client(monkeypatch, tmp_path):
+    """The real Flask app with a scratch RunHistoryStore (so the test neither
+    reads nor writes the shared run_history.json) and the Jev service calls
+    monkey-patched (offline)."""
+    store = RunHistoryStore(data_dir=str(tmp_path / "data"))
+    monkeypatch.setattr(singletons, "run_history", store)
+    monkeypatch.setattr(nyxstrike_server, "run_history", store)
+    monkeypatch.setenv("JEV_URL", "http://jev.test:8765")
+    fake = MagicMock()
+    fake.post.return_value = MagicMock(status_code=200, text="", json=lambda: _jev_run_goal_response())
+    fake.get.return_value = MagicMock(status_code=200, text="", json=lambda: _jev_get_evidence_response())
+    monkeypatch.setattr(web_interaction, "_requests", fake)
+    nyxstrike_server.app.config["TESTING"] = True
+    with nyxstrike_server.app.test_client() as c:
+        yield c, store, fake
+
+
+class TestWebRunInEvidenceChain:
+    """T-9 acceptance: after a web_run_goal, run_history holds a chained entry
+    whose hash/prev_hash verify_chain validates, and web_get_evidence exposes
+    that hash + the trace + the screenshots."""
+
+    def test_web_run_goal_creates_chained_entry(self, web_client):
+        client, store, _fake = web_client
+        resp = client.post(
+            "/api/tools/web_run_goal",
+            json={
+                "url": "https://range.invalid/login",
+                "goal": "obtain the flag",
+                "session_id": "sess_t9",
+                "scope_allowlist": ["range.invalid"],
+            },
+        )
+        assert resp.status_code == 200, resp.data
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["return_code"] == 0
+        # stdout carries summary + extracted (the contract fields the task asks for)
+        assert "DONE on 'obtain the flag'" in data["stdout"]
+        assert "flag{t9}" in data["stdout"]
+        assert "run_id=jev-t9-0001" in data["stdout"]
+        assert data["stderr"] == ""
+
+        entries = store.get_all()
+        assert len(entries) == 1, "web_run_goal must land exactly one entry in run_history"
+        entry = entries[0]
+        assert entry["tool"] == "web_run_goal"
+        assert entry["endpoint"] == "/api/tools/web_run_goal"
+        assert entry["session_id"] == "sess_t9"
+        # Chained: prev_hash is the genesis of this fresh store, hash self-consistent.
+        assert entry["prev_hash"] == GENESIS_HASH
+        assert entry["hash"] == compute_hash(entry, entry["prev_hash"])
+        # The Jev run id is inside the hashed content (stdout is a payload field).
+        assert "jev-t9-0001" in entry["stdout"]
+
+    def test_verify_chain_validates_the_web_entry(self, web_client):
+        client, store, _fake = web_client
+        client.post(
+            "/api/tools/web_run_goal",
+            json={"url": "https://range.invalid/login", "goal": "g", "session_id": "sess_t9"},
+        )
+        # Chain containing the web entry, oldest-first.
+        result = verify_chain(list(reversed(store.get_all())))
+        assert result["valid"] is True
+        assert result["verified_runs"] == 1
+        assert result["broken_at_index"] is None
+
+    def test_web_run_chains_after_a_prior_tool_run(self, web_client):
+        """A non-web run followed by a web run: the web entry's prev_hash must be
+        the earlier entry's hash, and the whole chain must still verify."""
+        client, store, _fake = web_client
+        first = store.record(tool="nmap", endpoint="/api/tools/nmap", params={}, result={"stdout": "open 22"})
+        client.post(
+            "/api/tools/web_run_goal",
+            json={"url": "https://range.invalid/login", "goal": "g", "session_id": "sess_t9"},
+        )
+        web_entry = store.get_all()[0]
+        assert web_entry["tool"] == "web_run_goal"
+        assert web_entry["prev_hash"] == first["hash"]
+        assert verify_chain(list(reversed(store.get_all())))["valid"] is True
+        assert find_run_by_hash(store.get_all(), first["hash"]) is not None
+
+    def test_web_get_evidence_exposes_hash_prev_hash_trace_and_screenshots(self, web_client):
+        client, store, _fake = web_client
+        client.post(
+            "/api/tools/web_run_goal",
+            json={
+                "url": "https://range.invalid/login",
+                "goal": "obtain the flag",
+                "session_id": "sess_t9",
+                "scope_allowlist": ["range.invalid"],
+            },
+        )
+        entry = store.get_all()[0]
+
+        resp = client.get("/api/tools/web_get_evidence", query_string={"run_id": "jev-t9-0001"})
+        assert resp.status_code == 200, resp.data
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["return_code"] == 0
+        # The chained entry's hash/prev_hash are exposed top-level in the response.
+        assert data["hash"] == entry["hash"]
+        assert data["prev_hash"] == entry["prev_hash"]
+        # The full trace travels here, not in the compressed subgoal response.
+        assert [h["operation"] for h in data["trace"]] == ["TYPE_TEXT", "CLICK"]
+        assert data["trace"][1]["url"] == "https://range.invalid/flag"
+        # The screenshots travel here too.
+        assert len(data["screenshots"]) == 2
+        assert data["screenshots"][1]["url"] == "https://range.invalid/flag"
+        # The Jev-side evidence digest is still there, distinct from the chain hash.
+        assert data["evidence_hash"] == "sha256:" + "a" * 64
+        # stdout is self-describing (for run_history/session_flow capture).
+        assert "hash=" in data["stdout"] and "trace=2 actions" in data["stdout"]
+
+    def test_web_get_evidence_missing_entry_reported_not_forged(self, web_client):
+        """With an empty run_history, web_get_evidence must still return the Jev
+        evidence but report chain fields as None — never a fabricated hash."""
+        client, store, _fake = web_client
+        assert store.get_all() == []
+        resp = client.get("/api/tools/web_get_evidence", query_string={"run_id": "jev-t9-0001"})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is True
+        assert data["hash"] is None
+        assert data["prev_hash"] is None
+        assert data["evidence_found"] is False
+        assert "chain" in data["stderr"] or "no matching" in data["stderr"].lower()
+        # The trace still comes straight from the Jev evidence store.
+        assert [h["operation"] for h in data["trace"]] == ["TYPE_TEXT", "CLICK"]
+
+    def test_web_get_evidence_matches_by_stdout_run_id_not_session_only(self, web_client):
+        """The lookup must key on the Jev run id (in the entry's stdout), not on
+        session_id alone — two runs in the same session must not cross-link."""
+        client, store, fake = web_client
+        evidence_by_run = {
+            "jev-t9-0001": _jev_get_evidence_response(),
+        }
+        second = dict(_jev_get_evidence_response())
+        second["run_id"] = "jev-t9-0002"
+        evidence_by_run["jev-t9-0002"] = second
+
+        def fake_get(url, **kwargs):
+            rid = url.rsplit("/", 1)[-1]
+            return MagicMock(status_code=200, text="", json=lambda r=rid: evidence_by_run[r])
+
+        fake.get.side_effect = fake_get
+        client.post(
+            "/api/tools/web_run_goal",
+            json={"url": "https://range.invalid/login", "goal": "first goal", "session_id": "sess_t9"},
+        )
+        second_payload = dict(_jev_run_goal_response())
+        second_payload["run_id"] = "jev-t9-0002"
+        second_payload["summary"] = "DONE on 'first goal' after 2 actions: TYPE_TEXT 1, CLICK 7."
+        fake.post.return_value = MagicMock(status_code=200, text="", json=lambda: second_payload)
+        client.post(
+            "/api/tools/web_run_goal",
+            json={"url": "https://range.invalid/login", "goal": "first goal", "session_id": "sess_t9"},
+        )
+
+        entries = store.get_all()  # newest-first: [0002, 0001]
+        assert [e["stdout"].split("run_id=")[1].split("\n")[0] for e in entries] == ["jev-t9-0002", "jev-t9-0001"]
+
+        resp = client.get("/api/tools/web_get_evidence", query_string={"run_id": "jev-t9-0002"})
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["hash"] == entries[0]["hash"]  # the entry whose stdout names jev-t9-0002
+        assert data["prev_hash"] == entries[1]["hash"]  # chained on the first run
+
+        resp_first = client.get("/api/tools/web_get_evidence", query_string={"run_id": "jev-t9-0001"})
+        first_data = resp_first.get_json()
+        assert first_data["hash"] == entries[1]["hash"]  # NOT the newer entry's hash

@@ -1,0 +1,494 @@
+{
+  "schema": "hades-routes-dataset/v1",
+  "version": 1,
+  "n_rows": 9,
+  "rows": [
+    {
+      "row_id": "rh-1",
+      "row_source": "run_history",
+      "campaign": "runhistory-session-anon",
+      "campaign_run": null,
+      "run_id": null,
+      "variant": null,
+      "step_index": null,
+      "subgoal": null,
+      "target": {
+        "type": null,
+        "label": "unknown",
+        "objective": null
+      },
+      "state": {
+        "state_text": null,
+        "phase": null,
+        "prev_step": null,
+        "session": {
+          "session_id": ""
+        },
+        "context": {
+          "det_shortlist": null,
+          "tool_stats_effectiveness": 1.0
+        }
+      },
+      "label": {
+        "tool": "web_recon/whatweb",
+        "params": {
+          "url": "https://whalestesting.tlsi.es"
+        },
+        "params_hash": "dd254b2407608045",
+        "fallback_tool": null,
+        "tactic": null,
+        "technique": null
+      },
+      "label_ref": null,
+      "outcome": {
+        "success": null,
+        "success_basis": "not_determined",
+        "category": null,
+        "verified": null,
+        "status": "ok",
+        "t_start": null,
+        "t_end": null
+      },
+      "refs": {
+        "artifact": "run_history.json",
+        "ref": "entry#1",
+        "timestamp": "2026-09-08T15:54:31"
+      }
+    },
+    {
+      "row_id": "rh-2",
+      "row_source": "run_history",
+      "campaign": "runhistory-session-anon",
+      "campaign_run": null,
+      "run_id": null,
+      "variant": null,
+      "step_index": null,
+      "subgoal": null,
+      "target": {
+        "type": null,
+        "label": "unknown",
+        "objective": null
+      },
+      "state": {
+        "state_text": null,
+        "phase": null,
+        "prev_step": null,
+        "session": {
+          "session_id": ""
+        },
+        "context": {
+          "det_shortlist": null,
+          "tool_stats_effectiveness": 0.6667
+        }
+      },
+      "label": {
+        "tool": "nikto",
+        "params": {
+          "target": "https://whalestesting.tlsi.es",
+          "additional_args": "-max-time 45"
+        },
+        "params_hash": "88d5391cd0a5b311",
+        "fallback_tool": null,
+        "tactic": null,
+        "technique": null
+      },
+      "label_ref": null,
+      "outcome": {
+        "success": null,
+        "success_basis": "not_determined",
+        "category": null,
+        "verified": null,
+        "status": "ok",
+        "t_start": null,
+        "t_end": null
+      },
+      "refs": {
+        "artifact": "run_history.json",
+        "ref": "entry#2",
+        "timestamp": "2026-09-08T15:55:51"
+      }
+    },
+    {
+      "row_id": "rh-3",
+      "row_source": "run_history",
+      "campaign": "runhistory-session-anon",
+      "campaign_run": null,
+      "run_id": null,
+      "variant": null,
+      "step_index": null,
+      "subgoal": null,
+      "target": {
+        "type": null,
+        "label": "unknown",
+        "objective": null
+      },
+      "state": {
+        "state_text": null,
+        "phase": null,
+        "prev_step": null,
+        "session": {
+          "session_id": ""
+        },
+        "context": {
+          "det_shortlist": null,
+          "tool_stats_effectiveness": 0.6667
+        }
+      },
+      "label": {
+        "tool": "nikto",
+        "params": {
+          "target": "https://whalestesting.tlsi.es",
+          "additional_args": "-maxtime 120 -timeout 15 -Display 3 -nolookup"
+        },
+        "params_hash": "348bb77075f21c9e",
+        "fallback_tool": null,
+        "tactic": null,
+        "technique": null
+      },
+      "label_ref": null,
+      "outcome": {
+        "success": null,
+        "success_basis": "not_determined",
+        "category": null,
+        "verified": null,
+        "status": "failed",
+        "t_start": null,
+        "t_end": null
+      },
+      "refs": {
+        "artifact": "run_history.json",
+        "ref": "entry#3",
+        "timestamp": "2026-09-08T15:56:54"
+      }
+    },
+    {
+      "row_id": "rh-4",
+      "row_source": "run_history",
+      "campaign": "runhistory-session-anon",
+      "campaign_run": null,
+      "run_id": null,
+      "variant": null,
+      "step_index": null,
+      "subgoal": null,
+      "target": {
+        "type": null,
+        "label": "unknown",
+        "objective": null
+      },
+      "state": {
+        "state_text": null,
+        "phase": null,
+        "prev_step": null,
+        "session": {
+          "session_id": ""
+        },
+        "context": {
+          "det_shortlist": null,
+          "tool_stats_effectiveness": 0.0
+        }
+      },
+      "label": {
+        "tool": "dirb",
+        "params": {
+          "url": "https://whalestesting.tlsi.es",
+          "wordlist": "/usr/share/wordlists/dirb/common.txt",
+          "additional_args": ""
+        },
+        "params_hash": "bcbe3ce8407a7e76",
+        "fallback_tool": null,
+        "tactic": null,
+        "technique": null
+      },
+      "label_ref": null,
+      "outcome": {
+        "success": null,
+        "success_basis": "not_determined",
+        "category": null,
+        "verified": null,
+        "status": "failed",
+        "t_start": null,
+        "t_end": null
+      },
+      "refs": {
+        "artifact": "run_history.json",
+        "ref": "entry#4",
+        "timestamp": "2026-09-08T15:56:55"
+      }
+    },
+    {
+      "row_id": "rh-5",
+      "row_source": "run_history",
+      "campaign": "runhistory-session-anon",
+      "campaign_run": null,
+      "run_id": null,
+      "variant": null,
+      "step_index": null,
+      "subgoal": null,
+      "target": {
+        "type": null,
+        "label": "unknown",
+        "objective": null
+      },
+      "state": {
+        "state_text": null,
+        "phase": null,
+        "prev_step": null,
+        "session": {
+          "session_id": ""
+        },
+        "context": {
+          "det_shortlist": null,
+          "tool_stats_effectiveness": 0.0
+        }
+      },
+      "label": {
+        "tool": "hakrawler",
+        "params": {
+          "url": "https://whalestesting.tlsi.es",
+          "depth": 2,
+          "forms": true,
+          "robots": true,
+          "sitemap": true,
+          "wayback": false,
+          "additional_args": ""
+        },
+        "params_hash": "32f945c3ac2549ba",
+        "fallback_tool": null,
+        "tactic": null,
+        "technique": null
+      },
+      "label_ref": null,
+      "outcome": {
+        "success": null,
+        "success_basis": "not_determined",
+        "category": null,
+        "verified": null,
+        "status": "ok",
+        "t_start": null,
+        "t_end": null
+      },
+      "refs": {
+        "artifact": "run_history.json",
+        "ref": "entry#5",
+        "timestamp": "2026-09-08T15:57:01"
+      }
+    },
+    {
+      "row_id": "rh-6",
+      "row_source": "run_history",
+      "campaign": "runhistory-session-anon",
+      "campaign_run": null,
+      "run_id": null,
+      "variant": null,
+      "step_index": null,
+      "subgoal": null,
+      "target": {
+        "type": null,
+        "label": "unknown",
+        "objective": null
+      },
+      "state": {
+        "state_text": null,
+        "phase": null,
+        "prev_step": null,
+        "session": {
+          "session_id": ""
+        },
+        "context": {
+          "det_shortlist": null,
+          "tool_stats_effectiveness": 1.0
+        }
+      },
+      "label": {
+        "tool": "web_recon/whatweb",
+        "params": {
+          "url": "https://whalestesting.tlsi.es"
+        },
+        "params_hash": "dd254b2407608045",
+        "fallback_tool": null,
+        "tactic": null,
+        "technique": null
+      },
+      "label_ref": null,
+      "outcome": {
+        "success": null,
+        "success_basis": "not_determined",
+        "category": null,
+        "verified": null,
+        "status": "ok",
+        "t_start": null,
+        "t_end": null
+      },
+      "refs": {
+        "artifact": "run_history.json",
+        "ref": "entry#6",
+        "timestamp": "2026-09-08T15:54:31"
+      }
+    },
+    {
+      "row_id": "rh-7",
+      "row_source": "run_history",
+      "campaign": "runhistory-session-anon",
+      "campaign_run": null,
+      "run_id": null,
+      "variant": null,
+      "step_index": null,
+      "subgoal": null,
+      "target": {
+        "type": null,
+        "label": "unknown",
+        "objective": null
+      },
+      "state": {
+        "state_text": null,
+        "phase": null,
+        "prev_step": null,
+        "session": {
+          "session_id": ""
+        },
+        "context": {
+          "det_shortlist": null,
+          "tool_stats_effectiveness": 1.0
+        }
+      },
+      "label": {
+        "tool": "subfinder",
+        "params": {
+          "domain": "tlsi.es",
+          "silent": true,
+          "all_sources": false,
+          "additional_args": ""
+        },
+        "params_hash": "18b2d220f1e66ca1",
+        "fallback_tool": null,
+        "tactic": null,
+        "technique": null
+      },
+      "label_ref": null,
+      "outcome": {
+        "success": null,
+        "success_basis": "not_determined",
+        "category": null,
+        "verified": null,
+        "status": "ok",
+        "t_start": null,
+        "t_end": null
+      },
+      "refs": {
+        "artifact": "run_history.json",
+        "ref": "entry#7",
+        "timestamp": "2026-09-08T15:57:22"
+      }
+    },
+    {
+      "row_id": "rh-8",
+      "row_source": "run_history",
+      "campaign": "runhistory-session-anon",
+      "campaign_run": null,
+      "run_id": null,
+      "variant": null,
+      "step_index": null,
+      "subgoal": null,
+      "target": {
+        "type": null,
+        "label": "unknown",
+        "objective": null
+      },
+      "state": {
+        "state_text": null,
+        "phase": null,
+        "prev_step": null,
+        "session": {
+          "session_id": ""
+        },
+        "context": {
+          "det_shortlist": null,
+          "tool_stats_effectiveness": 0.6667
+        }
+      },
+      "label": {
+        "tool": "nikto",
+        "params": {
+          "target": "https://whalestesting.tlsi.es",
+          "additional_args": "-maxtime 150 -timeout 15 -Display 3 -no404"
+        },
+        "params_hash": "569ac9760d4c36bb",
+        "fallback_tool": null,
+        "tactic": null,
+        "technique": null
+      },
+      "label_ref": null,
+      "outcome": {
+        "success": null,
+        "success_basis": "not_determined",
+        "category": null,
+        "verified": null,
+        "status": "ok",
+        "t_start": null,
+        "t_end": null
+      },
+      "refs": {
+        "artifact": "run_history.json",
+        "ref": "entry#8",
+        "timestamp": "2026-09-08T15:57:47"
+      }
+    },
+    {
+      "row_id": "rh-9",
+      "row_source": "run_history",
+      "campaign": "runhistory-session-anon",
+      "campaign_run": null,
+      "run_id": null,
+      "variant": null,
+      "step_index": null,
+      "subgoal": null,
+      "target": {
+        "type": null,
+        "label": "unknown",
+        "objective": null
+      },
+      "state": {
+        "state_text": null,
+        "phase": null,
+        "prev_step": null,
+        "session": {
+          "session_id": ""
+        },
+        "context": {
+          "det_shortlist": null,
+          "tool_stats_effectiveness": 0.0
+        }
+      },
+      "label": {
+        "tool": "web_scan/interactsh",
+        "params": {
+          "server": "",
+          "token": "***REDACTED***",
+          "n": 2,
+          "poll_interval": 3,
+          "timeout": 30,
+          "additional_args": ""
+        },
+        "params_hash": "1fe084fb943ea96d",
+        "fallback_tool": null,
+        "tactic": null,
+        "technique": null
+      },
+      "label_ref": null,
+      "outcome": {
+        "success": null,
+        "success_basis": "not_determined",
+        "category": null,
+        "verified": null,
+        "status": "failed",
+        "t_start": null,
+        "t_end": null
+      },
+      "refs": {
+        "artifact": "run_history.json",
+        "ref": "entry#9",
+        "timestamp": "2026-09-09T10:56:00"
+      }
+    }
+  ]
+}

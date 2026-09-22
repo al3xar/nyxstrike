@@ -36,6 +36,12 @@ from typing import Any, Callable, Dict, List, Optional
 from backend.server_core.attack_chain import AttackChain
 from backend.server_core.attack_step import AttackStep
 from backend.server_core.target_profile import TargetProfile
+from backend.server_core.intelligence.router import (
+    Decision,
+    DeterministicRouterModel,
+    RouterModel,
+    RoutingState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -678,6 +684,60 @@ class PlanAndApproveController:
         # category (see categorize_result / _classify_with_model).
         self.result_classifier = None
 
+        # T-21: optional router v1 (nivel 0-1) — OFF by default (level 3
+        # trained classifier is POSPUESTO until the T-22 benchmark
+        # justifies it; integration gated by T-23). Activation is
+        # per-session via configure_router (same pattern as the T-18
+        # gate_config). The model is pluggable via the RouterModel
+        # interface: a future trained classifier implements
+        # route(state) -> Decision and is swapped in here WITHOUT
+        # touching propose_next_step. When a session has no router_config
+        # (the default), propose_next_step behaves exactly as before — no
+        # router_decision field, no run_log entry — fully additive.
+        self.router_model: Optional[RouterModel] = None
+
+    # -- T-21: router v1 configuration ---------------------------------------
+
+    def configure_router(
+        self,
+        session_id: str,
+        enabled: bool = True,
+        model: Optional[RouterModel] = None,
+    ) -> Dict[str, Any]:
+        """Enable/disable the router v1 for *session_id* (per-session config).
+
+        Grounded in the ADR (nivel 1-2 del modelo del router): the router
+        emits ``(ruta, confianza, razón)`` from the indexed candidate set
+        (T-17), escalates to a small-model fallback on low confidence, and
+        records an auditable ``router_decision`` entry in the session
+        ``run_log``. ``model`` accepts any ``RouterModel`` (the trained
+        classifier of nivel 3 plugs in here); default is the deterministic
+        nivel 0. The router is OFF by default; this call opts a session in.
+        """
+        session = self._load(session_id)
+        if session is None:
+            return {"success": False, "error": f"session {session_id} not found", "return_code": 1}
+        pa = self._get_pa(session)
+        pa["router_config"] = {
+            "enabled": bool(enabled),
+            "model": model.name if model is not None else ("deterministic-v1" if enabled else None),
+        }
+        if model is not None:
+            self.router_model = model
+        elif pa["router_config"]["enabled"]:
+            self.router_model = self.router_model or DeterministicRouterModel()
+        self._persist(session)
+        return {
+            "success": True,
+            "session_id": session_id,
+            "router_config": pa["router_config"],
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    def _router_config(self, pa: Dict[str, Any]) -> Dict[str, Any]:
+        config = pa.get("router_config")
+        return config if isinstance(config, dict) else {}
+
     # -- persistence helpers -------------------------------------------------
 
     def _load(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -920,6 +980,48 @@ class PlanAndApproveController:
         nxt["status"] = STATUS_PROPOSED
         self._persist(session)
 
+        # T-21 (nivel 1-2 del modelo del router): per-session flag, OFF
+        # by default (the trained nivel-3 classifier stays POSPUESTO
+        # until the T-22 benchmark justifies it; integration gated by
+        # T-23). When active, the pluggable RouterModel emits
+        # (ruta, confianza, razón) from the indexed candidate set and an
+        # auditable router_decision entry lands in the session run_log.
+        # The proposal contract (next_step/candidates/selected_index) is
+        # untouched and nothing is executed here.
+        router_decision = None
+        router_cfg = self._router_config(pa)
+        if router_cfg.get("enabled") and candidates:
+            model = self.router_model or DeterministicRouterModel()
+            state: RoutingState = {
+                "state_text": None,
+                "phase": None,
+                "candidates": candidates,
+                "det_shortlist": [c.get("tool") for c in candidates if c.get("tool")],
+                "context": {},
+            }
+            try:
+                decision = model.route(state)
+            except Exception:
+                logger.exception("plan_and_approve.router: route failed for %s", session_id)
+                decision = None
+            if decision is not None:
+                router_decision = decision.to_dict()
+                _append_run_log(
+                    self.session_flow,
+                    session_id,
+                    {
+                        "type": "router_decision",
+                        "tool": decision.tool,
+                        "confidence": decision.confidence,
+                        "reason": decision.reason,
+                        "level": decision.level,
+                        "model": decision.model,
+                        "escalated": decision.escalated,
+                        "index": decision.index,
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+
         return {
             "success": True,
             "session_id": session_id,
@@ -929,6 +1031,7 @@ class PlanAndApproveController:
             "selected_index": selected_index,
             "chain_status": _chain_status(chain),
             "timestamp": datetime.now().isoformat(),
+            **({"router_decision": router_decision} if router_decision is not None else {}),
         }
 
     def _can_rerank(self, pa: Dict[str, Any]) -> bool:

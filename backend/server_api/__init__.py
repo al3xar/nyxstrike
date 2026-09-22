@@ -48,6 +48,7 @@ def register_blueprints(app):
   # Vulnerability Intelligence
   app.register_blueprint(api_vulnerability_intelligence_bp)
   app.register_blueprint(api_vuln_intel_cve_exploit_chain_bp)
+  app.register_blueprint(api_plan_approve_bp)
 
   # AI Assist
   app.register_blueprint(api_chat_bp)

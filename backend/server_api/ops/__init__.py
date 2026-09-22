@@ -1,6 +1,7 @@
 from .process_management import *
 from .system_monitoring import *
 from .vulnerability_intelligence import *
+from .plan_approve import *
 from .logs import *
 from .web_dashboard import *
 from .runs import *

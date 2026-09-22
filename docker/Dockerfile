@@ -67,11 +67,17 @@ RUN chmod +x docker/docker-entrypoint.sh
 # cyber-range deploy does not. Saves ~2.6GB unpacked (gcc/g++/mingw/llvm/clang,
 # rustup toolchain, uv/cargo caches, locales/docs). Rust/go *binaries* live in
 # /root/.cargo/bin and /root/go/bin (real ELF, not shims) and are untouched.
-RUN apt-get -y -qq remove --purge \
-        'gcc*' 'g++*' '*mingw*' 'clang*' 'llvm*' build-essential dpkg-dev \
-    && apt-get -y -qq autoremove --purge \
+RUN apt-get update -qq \
+    && for pkg in build-essential gcc g++ clang-21 clang-tools-21 llvm-21 \
+                 gcc-mingw-w64-i686-win32 gcc-mingw-w64-x86-64-win32 \
+                 binutils-mingw-w64-i686 binutils-mingw-w64-x86-64 dpkg-dev; do \
+         apt-get -y -qq remove --purge "$pkg" || true; \
+       done \
+    && (apt-get -y -qq autoremove --purge || true) \
     && rm -rf /root/.rustup /root/.cargo/registry /root/.cache \
               /usr/share/locale /usr/share/doc /usr/share/man \
+              /usr/lib/gcc /usr/libexec/gcc /usr/lib/llvm-* /usr/lib/clang \
+              /usr/x86_64-w64-mingw32 /usr/i686-w64-mingw32 /usr/share/mingw-w64 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ENTRYPOINT ["/opt/nyxstrike/docker/docker-entrypoint.sh"]

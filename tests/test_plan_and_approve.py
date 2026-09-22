@@ -1045,3 +1045,348 @@ class TestWebExecutor:
         # No web-interpretation fields leak into a non-web result.
         assert "web_status" not in r["result"]
         assert "fallback" not in r["result"]
+
+
+# ---------------------------------------------------------------------------
+# T-18 — pre-execution GATE in execute_step (colocación "b").
+#
+# The gate applies Jev's discipline to EVERY tool-call (not only web):
+#   (1) the chosen tool/params must belong to the proposed set (T-17) or the
+#       valid catalog  (analog of Jev's validate_choice "choice in ids");
+#   (2) host scope allowlist for ANY tool (generalisation of T-5);
+#   (3) duplicate-suppression / phase order via run_log +
+#       _session_failure_penalties (factor 0.2 -> dampening, here: reject);
+#   (4) campaign budget (executions / wall time) with BUDGET_EXCEEDED cut.
+# Every rejection leaves an AUDITABLE run_log entry.
+#
+# The gate is OFF by default (ADR §T-23: router/gate activable por flag, OFF
+# por defecto) so the existing plan-and-approve contract is untouched. It is
+# enabled per session via controller.configure_gate(...).
+# ---------------------------------------------------------------------------
+
+import time as _time_module
+from unittest.mock import patch as _mock_patch
+
+
+class _FakeTime:
+    """Controllable clock so the time-budget cut is deterministic (no sleeps)."""
+
+    def __init__(self, t0=1000.0):
+        self._now = float(t0)
+
+    def time(self):
+        return self._now
+
+    def advance(self, delta):
+        self._now += float(delta)
+
+
+def _gate_controller(
+    executor=None,
+    scope_hosts=None,
+    max_executions=None,
+    max_seconds=None,
+    proposed_tools=None,
+    enable=True,
+    profile="https://target.example.invalid",
+    decision_engine=None,
+):
+    """Build a controller (default fake engine unless *decision_engine*),
+    profile *profile*, and — when *enable* — turn the gate on per session.
+
+    Returns ``(ctrl, sf, sid)``.
+    """
+    if executor is None:
+        executor = lambda tool, params, sid: {
+            "success": True, "stdout": "ok", "stderr": "", "return_code": 0,
+        }
+    de = decision_engine or _FakeDecisionEngine()
+    sf = _FakeSessionFlow()
+    ctrl = PlanAndApproveController(decision_engine=de, session_flow=sf,
+                                    executor=executor)
+    r = ctrl.profile_target(profile, objective="comprehensive")
+    assert r["success"], r
+    sid = r["session_id"]
+    if enable:
+        ctrl.configure_gate(
+            sid,
+            scope_hosts=scope_hosts,
+            max_executions=max_executions,
+            max_seconds=max_seconds,
+            proposed_tools=proposed_tools,
+        )
+    return ctrl, sf, sid
+
+
+def _rejections(sf, sid):
+    return [e for e in sf.sessions[sid]["run_log"]
+            if e.get("event") == "gate_rejection"]
+
+
+class TestExecuteStepGate:
+    # -- (0) off by default -> zero behavior change -------------------------
+
+    def test_off_by_default_executes_out_of_catalog(self):
+        # hydra is NOT in the catalog; with the gate OFF it is executed ad-hoc
+        # (existing contract) and leaves NO gate_rejection entry. This pins the
+        # default: the gate must be opt-in.
+        calls = []
+
+        def fake_exec(tool, params, sid):
+            calls.append(tool)
+            return {"success": True, "stdout": "ok", "return_code": 0}
+
+        ctrl, sf, sid = _gate_controller(executor=fake_exec, enable=False)
+        r = ctrl.execute_step(sid, tool="hydra",
+                              params={"target": "target.example.invalid"})
+        assert r["success"] is True
+        assert calls == ["hydra"], "gate OFF must execute as before"
+        assert _rejections(sf, sid) == []
+
+    # -- (1) membership: choice must belong to proposed set / catalog -------
+
+    def test_out_of_catalog_rejected_without_executing(self):
+        calls = []
+
+        def fake_exec(tool, params, sid):
+            calls.append(tool)
+            return {"success": True, "stdout": "ok", "return_code": 0}
+
+        ctrl, sf, sid = _gate_controller(executor=fake_exec)
+        # hydra is neither in the proposed set nor in the catalog.
+        r = ctrl.execute_step(sid, tool="hydra",
+                              params={"target": "target.example.invalid"})
+        assert r["success"] is False
+        assert calls == [], "out-of-set choice must NOT reach the executor"
+        assert r["status"] == "BLOCKED"
+        assert r["gate"]["verdict"] == "not_in_proposed_set"
+        rej = _rejections(sf, sid)
+        assert len(rej) == 1
+        assert rej[0]["tool"] == "hydra"
+        assert rej[0]["in_catalog"] is False
+
+    def test_in_catalog_passes_membership(self):
+        ctrl, sf, sid = _gate_controller()
+        # nmap IS in the catalog -> membership passes -> the step executes.
+        r = ctrl.execute_step(sid, step_index=0)
+        assert r["success"] is True
+        assert r["executed_step"]["status"] == STATUS_EXECUTED
+        assert _rejections(sf, sid) == []
+
+    def test_in_proposed_set_not_catalog_passes(self):
+        # hydra is NOT in the catalog, but if it was OFFERED in the proposed
+        # set (T-17 candidates) the membership check must accept it.
+        calls = []
+
+        def fake_exec(tool, params, sid):
+            calls.append(tool)
+            return {"success": True, "stdout": "ok", "return_code": 0}
+
+        ctrl, sf, sid = _gate_controller(executor=fake_exec,
+                                         proposed_tools=["hydra"])
+        r = ctrl.execute_step(sid, tool="hydra",
+                              params={"target": "target.example.invalid"})
+        assert r["success"] is True
+        assert calls == ["hydra"]
+        assert _rejections(sf, sid) == []
+
+    # -- (2) host scope allowlist (generalisation of T-5) -------------------
+
+    def test_out_of_scope_blocked(self):
+        calls = []
+
+        def fake_exec(tool, params, sid):
+            calls.append(tool)
+            return {"success": True, "stdout": "ok", "return_code": 0}
+
+        ctrl, sf, sid = _gate_controller(
+            executor=fake_exec,
+            scope_hosts=["target.example.invalid"],
+        )
+        # nmap is in the catalog (membership passes) but the target host is
+        # outside the allowlist -> BLOCKED out_of_scope.
+        r = ctrl.execute_step(sid, tool="nmap",
+                              params={"target": "evil.example.com"})
+        assert r["success"] is False
+        assert calls == [], "out-of-scope tool must NOT reach the executor"
+        assert r["status"] == "BLOCKED"
+        assert "out_of_scope" in r["gate"]["verdict"]
+        assert _rejections(sf, sid)[0]["reason"].find("out_of_scope") >= 0
+
+    def test_in_scope_passes(self):
+        ctrl, sf, sid = _gate_controller(scope_hosts=["target.example.invalid"])
+        # The chain's nmap step targets the in-scope session target.
+        r = ctrl.execute_step(sid, step_index=0)
+        assert r["success"] is True
+        assert r["executed_step"]["status"] == STATUS_EXECUTED
+        assert _rejections(sf, sid) == []
+
+    def test_web_case_subsumed_by_gate(self):
+        # T-5's web out-of-scope case is now covered by the GENERAL gate:
+        # the web tool is accepted via the proposed set, then its host is
+        # scope-checked like any other tool. Executor must never run.
+        calls = []
+
+        def fake_exec(tool, params, sid):
+            calls.append(tool)
+            return _interpret_web_result and {
+                "status": "DONE", "verified": True, "summary": "x",
+            }
+
+        # web_run_goal is offered (T-17 proposed set) but the url host
+        # (t.example) is NOT in the allowlist.
+        ctrl, sf, sid = _gate_controller(
+            executor=fake_exec,
+            decision_engine=_WebDecisionEngine(),
+            profile="https://t.example",
+            scope_hosts=["target.example.invalid"],
+            proposed_tools=["web_run_goal"],
+        )
+        r = ctrl.execute_step(sid, step_index=0)
+        assert r["success"] is False
+        assert calls == [], "out-of-scope web tool must NOT reach the executor"
+        assert "out_of_scope" in r["gate"]["verdict"]
+        assert r["executed_step"]["tool"] == "web_run_goal"
+        assert _rejections(sf, sid)[0]["tool"] == "web_run_goal"
+
+    # -- (3) duplicate suppression / phase order ----------------------------
+
+    def test_duplicate_failure_rejected_dampening(self):
+        # A tool whose most recent run FAILED is deprioritized (factor 0.2,
+        # _session_failure_penalties). The gate turns that dampening into a
+        # hard rejection when the supervisor repeats it unchanged.
+        calls = []
+
+        def fail_exec(tool, params, sid):
+            calls.append(tool)
+            return {"success": False, "stdout": "", "stderr": "boom",
+                    "return_code": 1}
+
+        ctrl, sf, sid = _gate_controller(executor=fail_exec)
+        # First run of nmap: allowed, then fails (real execution).
+        r1 = ctrl.execute_step(sid, step_index=0)
+        assert r1["success"] is False
+        assert calls == ["nmap"]
+        # Second attempt at the SAME failed tool: rejected, executor not run.
+        r2 = ctrl.execute_step(sid, tool="nmap",
+                               params={"target": "target.example.invalid"})
+        assert r2["success"] is False
+        assert calls == ["nmap"], "repeated failed tool must not re-execute"
+        assert r2["status"] == "BLOCKED"
+        assert "duplicate" in r2["gate"]["verdict"]
+        assert len(_rejections(sf, sid)) == 1
+
+    def test_successful_tool_not_rejected_as_duplicate(self):
+        calls = []
+
+        def ok_exec(tool, params, sid):
+            calls.append(tool)
+            return {"success": True, "stdout": "ok", "return_code": 0}
+
+        ctrl, sf, sid = _gate_controller(executor=ok_exec)
+        r1 = ctrl.execute_step(sid, step_index=0)   # nmap succeeds
+        assert r1["success"] is True
+        # Repeating a tool whose last run SUCCEEDED is a legitimate retry,
+        # not a damped duplicate -> it may run again.
+        r2 = ctrl.execute_step(sid, tool="nmap",
+                               params={"target": "target.example.invalid"})
+        assert calls == ["nmap", "nmap"]
+        assert _rejections(sf, sid) == []
+
+    # -- (4) campaign budget ------------------------------------------------
+
+    def test_budget_executions_cut(self):
+        calls = []
+
+        def ok_exec(tool, params, sid):
+            calls.append(tool)
+            return {"success": True, "stdout": "ok", "return_code": 0}
+
+        ctrl, sf, sid = _gate_controller(executor=ok_exec, max_executions=1)
+        # First execution consumes the only execution slot.
+        r1 = ctrl.execute_step(sid, step_index=0)   # nmap
+        assert r1["success"] is True
+        assert calls == ["nmap"]
+        # Second execution exceeds the budget -> BUDGET_EXCEEDED cut.
+        r2 = ctrl.execute_step(sid, step_index=1)   # nuclei
+        assert r2["success"] is False
+        assert calls == ["nmap"], "over-budget tool must NOT reach the executor"
+        assert r2["status"] == "BLOCKED"
+        assert r2["gate"]["verdict"] == "budget_exceeded"
+        assert _rejections(sf, sid)[0]["tool"] == "nuclei"
+
+    def test_budget_time_cut(self):
+        calls = []
+
+        def ok_exec(tool, params, sid):
+            calls.append(tool)
+            return {"success": True, "stdout": "ok", "return_code": 0}
+
+        import backend.server_core.intelligence.plan_and_approve as pa
+
+        clock = _FakeTime(t0=1000.0)
+        ctrl, sf, sid = _gate_controller(executor=ok_exec, max_seconds=30)
+        with _mock_patch.object(pa, "time", clock):
+            r1 = ctrl.execute_step(sid, step_index=0)   # t=1000, elapsed 0
+            assert r1["success"] is True
+            assert calls == ["nmap"]
+            clock.advance(40)                          # t=1040, elapsed 40 > 30
+            r2 = ctrl.execute_step(sid, step_index=1)   # nuclei
+            assert r2["success"] is False
+            assert calls == ["nmap"]
+            assert r2["gate"]["verdict"] == "budget_exceeded"
+
+    def test_rejection_does_not_consume_budget(self):
+        # A gate rejection is an audit event, not an execution: it must NOT
+        # burn the campaign's execution budget.
+        calls = []
+
+        def ok_exec(tool, params, sid):
+            calls.append(tool)
+            return {"success": True, "stdout": "ok", "return_code": 0}
+
+        ctrl, sf, sid = _gate_controller(
+            executor=ok_exec, max_executions=1,
+            scope_hosts=["target.example.invalid"],
+        )
+        # Out-of-scope -> rejected (does not count toward the budget).
+        r_bad = ctrl.execute_step(sid, tool="nmap",
+                                  params={"target": "evil.example.com"})
+        assert r_bad["success"] is False
+        assert calls == []
+        # The single in-scope execution still fits the budget.
+        r_ok = ctrl.execute_step(sid, step_index=0)
+        assert r_ok["success"] is True
+        assert calls == ["nmap"]
+
+    # -- auditability: every rejection leaves a full run_log entry ---------
+
+    def test_rejection_run_log_is_auditable(self):
+        def fake_exec(tool, params, sid):
+            return {"success": True, "stdout": "ok", "return_code": 0}
+
+        ctrl, sf, sid = _gate_controller(executor=fake_exec)
+        ctrl.execute_step(sid, tool="hydra",
+                          params={"target": "target.example.invalid"})
+        entry = _rejections(sf, sid)[0]
+        # The audit record captures the offered candidates, the choice, the
+        # rejection verdict and its reason (plan §6 / T-22 "elecciones
+        # rechazadas por el gate").
+        for field in ("tool", "choice", "verdict", "reason",
+                      "candidates_offered", "executed", "blocked"):
+            assert field in entry, f"audit entry missing {field}"
+        assert entry["executed"] is False
+        assert entry["blocked"] is True
+        assert entry["verdict"] == "not_in_proposed_set"
+        assert isinstance(entry["choice"]["params"], dict)
+        assert entry["choice"]["tool"] == "hydra"
+
+    def test_configure_gate_enables_and_stores(self):
+        ctrl, sf, sid = _gate_controller(enable=False)
+        assert "gate_config" not in sf.sessions[sid]["metadata"]["plan_and_approve"]
+        ctrl.configure_gate(sid, scope_hosts=["a.example.invalid"],
+                            max_executions=5)
+        pa = sf.sessions[sid]["metadata"]["plan_and_approve"]
+        assert pa["gate_config"]["enabled"] is True
+        assert pa["gate_config"]["scope_hosts"] == ["a.example.invalid"]
+        assert pa["gate_config"]["max_executions"] == 5

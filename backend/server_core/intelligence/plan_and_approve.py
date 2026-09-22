@@ -26,7 +26,9 @@ by tests with a stubbed executor and no real tool processes.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import re
 import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
@@ -397,7 +399,6 @@ def _interpret_web_result(exec_result: Any) -> Dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
 # Controller
 # ---------------------------------------------------------------------------
 
@@ -437,6 +438,7 @@ class PlanAndApproveController:
 
         self.executor = executor or _default_step_executor()
 
+
     # -- persistence helpers -------------------------------------------------
 
     def _load(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -466,6 +468,46 @@ class PlanAndApproveController:
             self.session_flow.update_session(sid, {"metadata": session_dict.get("metadata", {})})
         except Exception:
             logger.exception("plan_and_approve: failed to persist metadata for %s", sid)
+
+    # -- T-18: pre-execution gate configuration ----------------------------
+
+    def configure_gate(
+        self,
+        session_id: str,
+        scope_hosts: Optional[List[str]] = None,
+        max_executions: Optional[int] = None,
+        max_seconds: Optional[float] = None,
+        proposed_tools: Optional[List[str]] = None,
+        enabled: bool = True,
+    ) -> Dict[str, Any]:
+        """Enable the pre-execution gate for *session_id* (per-session config).
+
+        Grounded in the ADR (colocación "b"): the gate validates every
+        tool-call against (1) the proposed set / catalog, (2) the host scope
+        allowlist, (3) duplicate-suppression, and (4) the campaign budget.
+        ``proposed_tools`` extends the gate's accepted id set beyond the
+        current chain candidates (e.g. tools not in the static catalog, such
+        as the web ``web_run_goal`` or a custom ``hydra``). The gate is OFF
+        by default; this call opts a session in.
+        """
+        session = self._load(session_id)
+        if session is None:
+            return {"success": False, "error": f"session {session_id} not found", "return_code": 1}
+        pa = self._get_pa(session)
+        pa["gate_config"] = {
+            "enabled": bool(enabled),
+            "scope_hosts": list(scope_hosts) if scope_hosts else [],
+            "max_executions": max_executions,
+            "max_seconds": max_seconds,
+            "proposed_tools": list(proposed_tools) if proposed_tools else [],
+        }
+        self._persist(session)
+        return {
+            "success": True,
+            "session_id": session_id,
+            "gate_config": pa["gate_config"],
+            "timestamp": datetime.now().isoformat(),
+        }
 
     # -- contract: profile_target -------------------------------------------
 
@@ -726,6 +768,7 @@ class PlanAndApproveController:
 
         # Resolve which step we are executing.
         chosen: Optional[Dict[str, Any]] = None
+        gate_chain_snapshot: Optional[List[Dict[str, Any]]] = None
         if step_index is not None:
             if 0 <= step_index < len(steps):
                 chosen = steps[step_index]
@@ -736,6 +779,11 @@ class PlanAndApproveController:
                     break
             if chosen is None:
                 # ad-hoc step (reorientation) -> build + append a new one
+                # Capture the gate snapshot BEFORE the append: the membership
+                # check must validate against the chain the supervisor was
+                # actually offered (its last known state), not against a step
+                # invented by this very call (see T-18 gate below).
+                gate_chain_snapshot = [dict(s) for s in steps if isinstance(s, dict)]
                 chosen = _adhoc_step(tool, params or {"target": target}, target)
                 steps.append(chosen)
 
@@ -759,6 +807,26 @@ class PlanAndApproveController:
             run_params.update(params)
         run_params.setdefault("target", target)
         run_params["session_id"] = session_id
+
+        # T-18 (colocación "b"): pre-execution GATE. Applies the Jev
+        # discipline to EVERY tool-call before the executor is reached:
+        # membership (choice in proposed set / catalog), host scope allowlist,
+        # duplicate suppression, and campaign budget. A rejection is returned
+        # to the planner WITHOUT executing and leaves an AUDITABLE run_log
+        # entry. Off by default (ADR §T-23).
+        gate_config = pa.get("gate_config")
+        if isinstance(gate_config, dict) and gate_config.get("enabled"):
+            step_tool = tool or chosen.get("tool", "")
+            gate = self._run_gate(
+                session,
+                pa,
+                step_index,
+                step_tool,
+                run_params,
+                chain_snapshot=gate_chain_snapshot,
+            )
+            if gate is not None:
+                return gate
 
         # Execute via the injected executor (stubbed in tests).
         try:
@@ -798,6 +866,7 @@ class PlanAndApproveController:
         chosen["status"] = STATUS_EXECUTED if succeeded else STATUS_FAILED
         chosen["result"] = _trim_result(exec_result, web_interp)
 
+
         # Record the run log for the evidence chain (grounded, hashable).
         _append_run_log(self.session_flow, session_id, {
             "tool": chosen.get("tool", ""),
@@ -806,7 +875,7 @@ class PlanAndApproveController:
             "stdout": exec_result.get("stdout", ""),
             "stderr": exec_result.get("stderr", ""),
             "return_code": exec_result.get("return_code", 0),
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": _now_iso(),
         })
 
         # Auto-advance the cursor past the executed step.
@@ -826,6 +895,106 @@ class PlanAndApproveController:
             "chain_status": _chain_status(chain),
             "timestamp": datetime.now().isoformat(),
         }
+
+    # -- T-18: pre-execution gate (colocación "b") --------------------------
+
+    def _run_gate(
+        self,
+        session: Dict[str, Any],
+        pa: Dict[str, Any],
+        step_index: Optional[int],
+        tool: str,
+        run_params: Dict[str, Any],
+        chain_snapshot: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Enforce the pre-execution GATE (ADR router-decision §3(b)).
+
+        Applies the Jev decision discipline to EVERY tool-call before the
+        executor is reached. Returns a planner-facing rejection (BLOCKED) when
+        the call is denied, or ``None`` when the call may proceed. Check order
+        mirrors the gate's contract:
+
+        1. **membership** — the chosen tool must belong to the proposed set
+           (chain candidates + ``proposed_tools`` opt-in, T-17) or the valid
+           catalog; analog of Jev's ``validate_choice`` (``choice in ids``).
+        2. **scope** — the host must be inside the session allowlist
+           (``scope_hosts``); generalises T-5's web-only allowlist to every
+           tool. A host the session itself was profiled against is
+           implicitly in scope (anchor).
+        3. **duplicate suppression / phase order** — a tool whose most recent
+           recorded run FAILED is dampened by
+           ``_session_failure_penalties`` (factor 0.2); the gate turns that
+           dampening into a hard rejection when the supervisor repeats it
+           unchanged (dampening, not blind exclusion).
+        4. **budget** — the campaign execution / wall-time cap, cut with an
+           explicit ``budget_exceeded``.
+
+        Every rejection leaves an AUDITABLE ``gate_rejection`` run_log entry
+        (candidates offered, the choice, the verdict and its reason) — plan
+        §6 / T-22 "elecciones rechazadas por el gate".
+        """
+        cfg = pa.get("gate_config") or {}
+        scope_hosts = cfg.get("scope_hosts") or []
+        proposed = set(cfg.get("proposed_tools") or [])
+        candidates = list(
+            _gate_candidate_tools(session, chain_snapshot=chain_snapshot)
+        )
+        accepted = set(candidates) | proposed
+        session_id = session.get("session_id")
+        # (1) membership — the tool must belong to the proposed set / catalog.
+        in_catalog = _gate_in_catalog(self.decision_engine, tool)
+
+        def _deny(verdict: str, reason: str) -> Dict[str, Any]:
+            entry = {
+                "event": _GATE_EVENT_REJECTION,
+                "tool": tool,
+                "choice": {"tool": tool, "params": dict(run_params or {})},
+                "verdict": verdict,
+                "reason": reason,
+                "candidates_offered": candidates,
+                "in_catalog": in_catalog,
+                "executed": False,
+                "blocked": True,
+                "timestamp": _now_iso(),
+            }
+            _append_run_log(self.session_flow, session_id, entry)
+            return _gate_block_response(
+                session_id, step_index, candidates, tool, run_params, verdict, reason
+            )
+
+        if tool not in accepted and not in_catalog:
+            return _deny("not_in_proposed_set", "choice not in the proposed set nor in the valid catalog")
+
+        # (2) scope — host allowlist (generalised T-5), session target anchors.
+        session_host = _gate_session_host(session)
+        host = None
+        for key in _GATE_HOST_PARAM_KEYS:
+            if key in run_params and isinstance(run_params.get(key), str):
+                host = _gate_host(run_params.get(key))
+                if host:
+                    break
+        in_scope = _gate_host_in_scope(host, scope_hosts)
+        if in_scope and session_host and host and host != session_host:
+            # The session was profiled against a specific target: treat that
+            # target as an implicit in-scope anchor so legitimate steps aimed
+            # at the session's own host pass even with a narrow allowlist.
+            in_scope = _gate_host_in_scope(host, [session_host])
+        if not in_scope:
+            return _deny("host_out_of_scope", f"host '{host}' is out_of_scope for the session allowlist")
+
+        # (3) duplicate suppression / phase order — dampened failed repeats.
+        last_outcome = _gate_last_outcome(session)
+        if last_outcome.get(tool) is False:
+            return _deny(
+                "duplicate_failure",
+                "tool failed on its most recent run (dampened via _session_failure_penalties, factor 0.2) and was repeated unchanged",
+            )
+
+        # (4) budget — campaign execution / wall-time cap.
+        if _gate_budget_status(session, cfg.get("max_executions"), cfg.get("max_seconds")):
+            return _deny("budget_exceeded", "campaign budget (executions / wall time) exceeded")
+
+        return None
 
     # -- contract: update_chain --------------------------------------------
 
@@ -985,6 +1154,229 @@ class PlanAndApproveController:
             "timestamp": datetime.now().isoformat(),
         }
         return report
+
+
+# ---------------------------------------------------------------------------
+# T-18 — pre-execution GATE (colocación "b").
+#
+# Applies the Jev decision discipline to EVERY tool-call (not only web):
+#   (1) membership — the chosen tool must belong to the proposed set (T-17
+#       indexed candidates) or the valid catalog (analog of Jev's
+#       validate_choice "choice in ids"); today run_tool does NOT enforce
+#       this, so a free-text choice would execute unchecked;
+#   (2) scope — a per-session host allowlist applied to ANY tool (generalises
+#       T-5's web-only allowlist);
+#   (3) duplicate suppression / phase order — a tool whose most recent run
+#       failed in this session is dampened by _session_failure_penalties
+#       (factor 0.2); the gate turns that into a hard rejection when the
+#       supervisor repeats it unchanged (dampening, not blind exclusion);
+#   (4) budget — a campaign cap on executions / wall time, cut with an
+#       explicit BUDGET_EXCEEDED.
+#
+# Every rejection leaves an AUDITABLE run_log entry (candidates offered,
+# choice, verdict, reason) per plan §6 / T-22 "elecciones rechazadas por el
+# gate".
+#
+# The gate is OFF by default (ADR §T-23: router/gate activable por flag, OFF
+# por defecto). It is enabled per session via ``configure_gate`` so the
+# existing plan-and-approve contract is untouched until it is opted in.
+# ---------------------------------------------------------------------------
+
+# Keys whose values carry a host/domain to scope-check. Grounded in the
+# parameter names the catalog + MCP gateway actually use ("target" is the
+# canonical one; "url"/"host"/"hostname" are the common web/ssh variants).
+_GATE_HOST_PARAM_KEYS = ("target", "url", "host", "hostname", "ip")
+
+_GATE_EVENT_REJECTION = "gate_rejection"
+_GATE_EVENT_ALLOW = "gate_allow"
+
+
+def _gate_host(value: Any) -> Optional[str]:
+    """Extract a scope-checkable host (domain / bare IP) from a param value.
+
+    Grounded: strips a scheme, the ``user@`` prefix, a path, a port and IPv6
+    bracketing. Returns None when the value is not a host-like string.
+    """
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    if s.startswith(("http://", "https://")):
+        s = s.split("://", 1)[1]
+    # drop a user@ prefix and any path/query (host:port comes first).
+    s = s.split("@", 1)[-1]
+    s = s.split("/", 1)[0]
+    s = s.split("?", 1)[0]
+    # IPv6: keep the bracketed host only.
+    if s.startswith("["):
+        end = s.find("]")
+        return s[1:end] if end > 1 else None
+    # bare host:port -> host.
+    s = s.split(":", 1)[0]
+    s = s.strip()
+    return s or None
+
+
+def _gate_ip_key(host: Optional[str]) -> Optional[str]:
+    """Map *host* to a comparable key: the exact host string, or the normalised
+    IP string when *host* is a literal IP (so allowlist "10.0.0.1" matches
+    "10.0.0.1:443" style values)."""
+    if not host:
+        return None
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        return host
+
+
+def _gate_candidate_tools(
+    session_dict: Dict[str, Any],
+    chain_snapshot: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
+    """Tools offered to the supervisor in the LAST propose_next_step call.
+
+    Sourced from the plan-and-approve chain's pending steps (the concrete
+    candidate set, in order) — the gate's "id set" analog of Jev's action
+    space. When *chain_snapshot* is given (a copy of the steps taken before
+    the current call appended an ad-hoc reorientation step), it is used
+    instead of the live chain: the membership check must validate against
+    what the supervisor was actually offered, not against a step that the
+    very call being validated invented.
+    """
+    steps: List[Dict[str, Any]]
+    if chain_snapshot is not None:
+        steps = [s for s in chain_snapshot if isinstance(s, dict)]
+    else:
+        meta = session_dict.get("metadata") or {}
+        pa = meta.get(PA_METADATA_KEY) or {}
+        chain = pa.get("chain") or {}
+        steps = chain.get("steps", [])
+    tools: List[str] = []
+    for s in steps:
+        if not isinstance(s, dict):
+            continue
+        tool = s.get("tool")
+        if tool and tool not in tools:
+            tools.append(tool)
+    return tools
+
+
+def _gate_in_catalog(decision_engine: Any, tool: str) -> bool:
+    """True when *tool* is a member of the valid tool catalog."""
+    if not tool:
+        return False
+    catalog = getattr(decision_engine, "tool_catalog", None) or {}
+    return tool in catalog
+
+
+def _gate_last_outcome(session_dict: Dict[str, Any]) -> Dict[str, bool]:
+    """Last recorded outcome per tool in the session run_log.
+
+    Reuses the same "last entry wins" semantics as
+    IntelligentDecisionEngine._session_failure_penalties (so a tool that failed
+    and later succeeded on retry is no longer penalized).
+    """
+    run_log = session_dict.get("run_log") or []
+    last: Dict[str, bool] = {}
+    for entry in run_log:
+        if not isinstance(entry, dict):
+            continue
+        tool = entry.get("tool")
+        # Execution entries only — gate events carry no "tool" success flag.
+        if not tool or "success" not in entry:
+            continue
+        last[tool] = bool(entry.get("success", False))
+    return last
+
+
+def _gate_session_host(session_dict: Dict[str, Any]) -> Optional[str]:
+    """The session's primary target host (for the implicit in-scope anchor)."""
+    target = session_dict.get("target")
+    return _gate_host(target)
+
+
+def _gate_host_in_scope(host: Optional[str], scope_hosts: List[str]) -> bool:
+    """True when *host* is inside the allowlist *scope_hosts*.
+
+    An empty/None allowlist means "no scope restriction" (gate off for the
+    scope dimension) -> True. When the allowlist is set, the host must match
+    an entry exactly, as an IP-normalised key, or be a subdomain of an entry.
+    """
+    if not scope_hosts:
+        return True
+    if not host:
+        return True
+    host_lc = host.lower().strip(".")
+    for entry in scope_hosts:
+        e = str(entry).lower().strip().strip(".")
+        if not e:
+            continue
+        if host_lc == e:
+            return True
+        # subdomain: host ends with ".<entry>"
+        if host_lc.endswith("." + e):
+            return True
+        # IP normalisation match (allowlist IP vs param host:port/IP).
+        if _gate_ip_key(host_lc) == _gate_ip_key(e):
+            return True
+    return False
+
+
+def _gate_budget_status(
+    session_dict: Dict[str, Any],
+    max_executions: Optional[int],
+    max_seconds: Optional[float],
+) -> Optional[str]:
+    """Return 'budget_exceeded' when the campaign cap is reached, else None."""
+    if max_executions is not None:
+        n_exec = sum(
+            1 for e in (session_dict.get("run_log") or [])
+            if isinstance(e, dict) and e.get("event") not in (_GATE_EVENT_REJECTION, _GATE_EVENT_ALLOW)
+        )
+        if n_exec >= max_executions:
+            return "budget_exceeded"
+    if max_seconds is not None:
+        run_log = session_dict.get("run_log") or []
+        start = None
+        for e in run_log:
+            if isinstance(e, dict) and "timestamp" in e and e.get("event") not in (_GATE_EVENT_REJECTION, _GATE_EVENT_ALLOW):
+                start = e.get("timestamp")
+                break
+        if start is not None:
+            try:
+                elapsed = time.time() - datetime.fromisoformat(start).timestamp()
+            except (ValueError, TypeError):
+                elapsed = 0.0
+            if elapsed >= max_seconds:
+                return "budget_exceeded"
+    return None
+
+
+def _gate_block_response(
+    session_id: str,
+    step_index: Optional[int],
+    candidates: List[str],
+    tool: str,
+    run_params: Dict[str, Any],
+    verdict: str,
+    reason: str,
+) -> Dict[str, Any]:
+    """Build the planner-facing rejection response (executor NOT called)."""
+    return {
+        "success": False,
+        "status": "BLOCKED",
+        "session_id": session_id,
+        "step_index": step_index,
+        "gate": {"verdict": verdict, "reason": reason,
+                 "candidates": candidates},
+        "executed_step": {
+            "tool": tool,
+            "status": "proposed",
+            "reason": f"gate rejected: {verdict} ({reason})",
+        },
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1315,3 +1707,14 @@ def _append_run_log(session_flow: Any, session_id: str, entry: Dict[str, Any]) -
         session_flow.append_run_log(session_id, entry)
     except Exception:
         logger.debug("plan_and_approve: append_run_log failed for %s", session_id, exc_info=True)
+
+
+def _now_iso() -> str:
+    """Clock-driven ISO timestamp for run_log entries.
+
+    Built from ``time.time()`` (not ``datetime.now()``) so an entry's
+    timestamp stays consistent with the elapsed-time arithmetic in
+    ``_gate_budget_status`` when tests patch the module's ``time`` clock
+    (the T-18 time-budget cut is deterministic that way).
+    """
+    return datetime.fromtimestamp(time.time()).isoformat()

@@ -1012,6 +1012,7 @@ class PlanAndApproveController:
                     {
                         "type": "router_decision",
                         "tool": decision.tool,
+                        "action": decision.action,
                         "confidence": decision.confidence,
                         "reason": decision.reason,
                         "level": decision.level,

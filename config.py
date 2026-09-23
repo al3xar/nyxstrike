@@ -58,6 +58,16 @@ _config = {
     "NYXSTRIKE_LLM_NUM_CTX":  4096,                             # Context window size for chat (Ollama only)
     "NYXSTRIKE_LLM_NUM_CTX_ANALYSE": 16384,                     # Context window size for AI Analyse / AI Report (Ollama only)
 
+    # ── TypeSafe / System One (Jev) ───────────────────────────────────────────
+    # Jev is TypeSafe's System One model: it returns a typed Choice + calibrated
+    # confidence instead of free text. Wired as the router's nivel-1 escalation
+    # fallback (backend/server_core/intelligence/router_jev.py) — OFF by default.
+    # The API key is NOT stored here: the SDK reads it from the TYPESAFE_API_KEY
+    # environment variable (server-side secret, never in a cluster .env).
+    "TYPESAFE_MODEL":          "jev",                           # System One model id
+    "TYPESAFE_ROUTER_ENABLED": False,                          # opt-in Jev fallback for the router
+    "TYPESAFE_TIMEOUT":        30,                              # seconds
+
     # ── Chat widget ───────────────────────────────────────────────────────────
     "CHAT_PERSONALITY": "nyxstrike",  # active personality preset id (see server_core/intelligence/chat_personalities.py)
     "CHAT_SYSTEM_PROMPT": (

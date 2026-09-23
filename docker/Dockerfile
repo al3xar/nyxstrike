@@ -37,14 +37,17 @@ RUN apt-get update -qq && \
 # Add the Postgres backend driver so the image can run against the in-cluster
 # Postgres (NYXSTRIKE_DB_BACKEND=postgres, DATABASE_URL=postgres://...). This is
 # a no-op for the default SQLite backend. Reconciles the venv to base + tools +
-# postgres from the pinned lock.
+# postgres + ai from the pinned lock. The `ai` extra installs typesafe-sdk,
+# which backs the router's nivel-1 Jev/System One fallback
+# (backend/server_core/intelligence/router_jev.py); `--no-dev` keeps pytest &
+# friends out of the runtime image.
 # NOTE: docker-entrypoint.sh resolves ROOT_DIR to the docker/ dir (where it
 # lives) and execs `${ROOT_DIR}/nyxstrike-env/bin/python3` +
 # `${ROOT_DIR}/nyxstrike_server.py`. So the venv AND the server must live under
 # docker/ for the entrypoint to find them. (Previously the venv was built at
 # /opt/nyxstrike/nyxstrike-env -> "No such file or directory" on every image.)
 RUN UV_PROJECT_ENVIRONMENT=/opt/nyxstrike/docker/nyxstrike-env \
-    uv sync --frozen --extra tools --extra postgres
+    uv sync --frozen --no-dev --extra tools --extra postgres --extra ai
 
 # Copy the runtime entrypoint target into docker/ so ROOT_DIR-relative lookup works.
 RUN cp -f /opt/nyxstrike/nyxstrike_server.py /opt/nyxstrike/docker/nyxstrike_server.py \

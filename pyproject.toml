@@ -43,6 +43,13 @@ big = [
     "kube-hunter>=0.6.8",
     "shodan>=1.31.0",
 ]
+# TypeSafe System One (Jev) SDK — backs the router's nivel-1 escalation
+# fallback (backend/server_core/intelligence/router_jev.py). Optional: the
+# fallback abstains cleanly when the SDK/key is absent, so the core and the
+# test suite run without it. Install with `pip install '.[ai]'`.
+ai = [
+    "typesafe-sdk>=0.1.0",
+]
 # Postgres backend for the cyber-range Kubernetes deployment (backend/server_core/
 # db_backend.py). Not needed for the default SQLite backend — install with
 # `uv sync --extra postgres` / `pip install '.[postgres]'` only in-cluster.

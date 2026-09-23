@@ -47,6 +47,11 @@ During `VULN`, group findings by type and invoke the relevant specialist in para
   - Second attempt: try a broader wordlist or different approach
   - Third attempt: record in `dead_ends[]`, advance to the next phase anyway, note gaps in final report
 - Never loop more than 3 times in the same phase for the same target/endpoint
+- When the Python router v1 is active (`server_core/intelligence/router_jev.py`, opt-in
+  per session), its Jev/System One fallback may return the decision
+  `action = "advance_phase"` — "no offered tool adds useful signal, move on". The
+  router only *proposes* it (audited in `run_log` as `router_decision`); the supervisor
+  performs the actual phase transition, consistent with the third-attempt rule above.
 
 ---
 

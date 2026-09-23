@@ -55,6 +55,13 @@ ROUTER_CONFIDENCE_THRESHOLD = 0.6
 CLEAR_MARGIN = 0.15
 NARROW_MARGIN = 0.05
 
+#: Non-tool routing action: "none of the offered tools adds useful signal —
+#: advance to the next phase". A nivel-1 fallback may propose it as the
+#: escalation escape hatch (the "none-of-these" of the offered set); the gate
+#: accepts it like an in-set tool choice, subject to the same confidence
+#: threshold. Deterministic nivel 0 never emits it (it ranks tools only).
+ADVANCE_PHASE = "advance_phase"
+
 
 # ---------------------------------------------------------------------------
 # Decision — the router's output contract
@@ -76,6 +83,13 @@ class Decision:
       stage OR when low confidence forced the supervisor to review.
     * ``index``: 1-based position of the chosen tool inside the offered
       candidate set (Jev-style: the supervisor answers with an index).
+    * ``action``: a non-tool routing action instead of a tool. Currently the
+      only value is ``ADVANCE_PHASE`` ("none of the offered tools adds useful
+      signal — move to the next phase"), the escalation escape hatch a nivel-1
+      fallback may propose. ``None`` on an ordinary tool decision. When set,
+      ``tool`` is ``None`` and ``index`` is ``None``: the router DECIDES the
+      action, the supervisor/state-machine ACTS on it (same boundary as a tool
+      proposal — the router never advances the phase itself).
     """
 
     tool: Optional[str]
@@ -85,6 +99,7 @@ class Decision:
     escalated: bool = False
     model: str = "deterministic-v1"
     index: Optional[int] = None
+    action: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -262,7 +277,10 @@ class DeterministicRouterModel(RouterModel):
         except Exception as exc:  # noqa: BLE001 — fallback must never break routing
             logger.warning("router fallback %s failed: %s", self.fallback.name, exc)
             fb = None
-        if fb is not None and fb.tool in {c.get("tool") for c in candidates} and fb.confidence >= self.threshold:
+        fb_valid = fb is not None and (
+            fb.action == ADVANCE_PHASE or fb.tool in {c.get("tool") for c in candidates}
+        )
+        if fb_valid and fb.confidence >= self.threshold:
             return Decision(
                 tool=fb.tool,
                 confidence=fb.confidence,
@@ -271,6 +289,7 @@ class DeterministicRouterModel(RouterModel):
                 escalated=True,
                 model=self.fallback.name,
                 index=_index_of(candidates, fb.tool),
+                action=fb.action,
             )
         fb_note = (
             "fallback abstained/rejected"

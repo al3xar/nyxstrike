@@ -1,0 +1,30 @@
+# Build-context trim → smaller image (the Dockerfile does `COPY . .`).
+# Keep runtime assets (frontend/dashboard build output is served by Flask);
+# only drop things the image never needs.
+
+# VCS / local envs
+.git
+.gitignore
+.venv
+nyxstrike-env
+
+# Python caches / build artifacts
+**/__pycache__
+**/*.py[cod]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Tests + local data (not needed at runtime)
+tests
+.nyxstrike_data
+
+# OS / editor cruft
+.DS_Store
+**/.DS_Store
+*.swp
+
+# CI / docs (image doesn't serve these)
+.github
+docs/superpowers

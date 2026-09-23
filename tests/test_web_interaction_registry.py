@@ -364,3 +364,68 @@ class TestFlaskEndpoints:
         # No run_id query param -> the blueprint's required-param check returns 400.
         assert resp.status_code == 400
         assert "run_id" in resp.get_json()["error"]
+
+
+# ---------------------------------------------------------------------------
+# Jev API-token auth (public endpoint gates every request behind a Bearer token)
+# ---------------------------------------------------------------------------
+class TestJevAuthHeader:
+    """The public Jev endpoint requires ``Authorization: Bearer <token>``.
+
+    When ``JEV_API_TOKEN`` is set every handler must forward it; unset (an
+    in-cluster Jev with no auth, or the offline tests) must send NO Authorization
+    header so local/dummy setups keep working unchanged.
+    """
+
+    params = {
+        "url": "https://range.invalid/login",
+        "goal": "obtain the flag",
+        "session_id": "hades-sess-1",
+    }
+
+    def _spec(self, wi, name):
+        return next(s for s in wi.SPECS if s.name == name)
+
+    def test_run_goal_forwards_bearer_token_when_set(self, monkeypatch):
+        import backend.server_core.tool_specs.web_interaction as wi
+        monkeypatch.setenv("JEV_URL", "http://jev.test:8765")
+        monkeypatch.setenv("JEV_API_TOKEN", "s3cr3t-token")
+        fake = _patch_requests(monkeypatch, _fake_response(200, {
+            "run_id": "jev-abc", "status": "done", "session_id": "hades-sess-1",
+            "elapsed_ms": 1, "error": None,
+        }))
+        self._spec(wi, "web_run_goal").handler(dict(self.params))
+        headers = fake.post.call_args[1].get("headers") or {}
+        assert headers.get("Authorization") == "Bearer s3cr3t-token"
+
+    def test_extract_surface_forwards_bearer_token_when_set(self, monkeypatch):
+        import backend.server_core.tool_specs.web_interaction as wi
+        monkeypatch.setenv("JEV_URL", "http://jev.test:8765")
+        monkeypatch.setenv("JEV_API_TOKEN", "s3cr3t-token")
+        fake = _patch_requests(monkeypatch, _fake_response(200, {"elements": [], "title": "t"}))
+        self._spec(wi, "web_extract_surface").handler(
+            {"url": self.params["url"], "session_id": self.params["session_id"]}
+        )
+        headers = fake.post.call_args[1].get("headers") or {}
+        assert headers.get("Authorization") == "Bearer s3cr3t-token"
+
+    def test_get_evidence_forwards_bearer_token_when_set(self, monkeypatch):
+        import backend.server_core.tool_specs.web_interaction as wi
+        monkeypatch.setenv("JEV_URL", "http://jev.test:8765")
+        monkeypatch.setenv("JEV_API_TOKEN", "s3cr3t-token")
+        fake = _patch_requests(monkeypatch, _fake_response(200, {"history": [], "screenshots": []}))
+        self._spec(wi, "web_get_evidence").handler({"run_id": "jev-abc"})
+        headers = fake.get.call_args[1].get("headers") or {}
+        assert headers.get("Authorization") == "Bearer s3cr3t-token"
+
+    def test_no_authorization_header_when_token_unset(self, monkeypatch):
+        import backend.server_core.tool_specs.web_interaction as wi
+        monkeypatch.setenv("JEV_URL", "http://jev.test:8765")
+        monkeypatch.delenv("JEV_API_TOKEN", raising=False)
+        fake = _patch_requests(monkeypatch, _fake_response(200, {
+            "run_id": "jev-abc", "status": "done", "session_id": "hades-sess-1",
+            "elapsed_ms": 1, "error": None,
+        }))
+        self._spec(wi, "web_run_goal").handler(dict(self.params))
+        headers = fake.post.call_args[1].get("headers") or {}
+        assert "Authorization" not in headers

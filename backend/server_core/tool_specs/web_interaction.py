@@ -43,6 +43,19 @@ def _jev_base_url() -> str:
     return (os.environ.get("JEV_URL", "") or "").rstrip("/")
 
 
+def _jev_headers() -> dict:
+    """Auth headers for the Jev service.
+
+    The public Jev endpoint gates every request behind an API token: when
+    ``JEV_API_TOKEN`` is set it travels as ``Authorization: Bearer <token>``.
+    Unset (an in-cluster Jev with no auth, or the offline tests) yields no
+    header, so local/dummy setups keep working unchanged. All three handlers
+    pass this through ``headers=``.
+    """
+    token = (os.environ.get("JEV_API_TOKEN", "") or "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 # --- response shaping -------------------------------------------------------
 
 def _run_goal_stdout(payload: dict, fallback_summary: str) -> str:
@@ -151,7 +164,7 @@ def _run_goal_handler(p: dict) -> dict:
             body[key] = p[key]
 
     try:
-        resp = _requests.post(f"{base}/run_goal", json=body, timeout=None)
+        resp = _requests.post(f"{base}/run_goal", json=body, headers=_jev_headers(), timeout=None)
     except requests.exceptions.RequestException as exc:
         return _network_failure(exc)
 
@@ -194,7 +207,7 @@ def _extract_surface_handler(p: dict) -> dict:
     body = {"url": url, "session_id": session_id, "reuse_session": bool(p.get("reuse_session", True))}
 
     try:
-        resp = _requests.post(f"{base}/extract_surface", json=body, timeout=None)
+        resp = _requests.post(f"{base}/extract_surface", json=body, headers=_jev_headers(), timeout=None)
     except requests.exceptions.RequestException as exc:
         return _network_failure(exc)
 
@@ -258,7 +271,7 @@ def _get_evidence_handler(p: dict) -> dict:
         }
 
     try:
-        resp = _requests.get(f"{base}/get_evidence/{run_id}", timeout=None)
+        resp = _requests.get(f"{base}/get_evidence/{run_id}", headers=_jev_headers(), timeout=None)
     except requests.exceptions.RequestException as exc:
         return _network_failure(exc)
 

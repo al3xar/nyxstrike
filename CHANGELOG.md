@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.0.0 (2026-11-02)
+
+### AI decision engine (router)
+- New deterministic, precision-first **tool router** — ranks indexed candidates by `effective_score`, emits an auditable `Decision(tool, confidence, reason, level, …)` and calibrates confidence by margin. Injected per session via `configure_router(...)`; off by default.
+- **Jev (TypeSafe System One) as the escalation gate** — when deterministic confidence drops below `ROUTER_CONFIDENCE_THRESHOLD` (~0.6), the router asks Jev a typed `Choice` over the offered shortlist instead of a free-text prompt. The pick is validated against the shortlist (`choice in allowed`); out-of-set, abstention, missing SDK/key, timeout, or any network error falls back to the deterministic top-1, so the pipeline never blocks.
+- The System One call sits behind an injectable `judge_fn` (lazy `typesafe_sdk` import, key from `TYPESAFE_API_KEY`) — tests run fully offline and never hit a paid API.
+
+### Jev web executor
+- New `web_interaction` toolspec category — Jev driven as an HTTP-backed NyxStrike tool category (not a standalone MCP), proxied against `JEV_URL`:
+  - `web_run_goal` — run a natural-language goal against a web target.
+  - `web_extract_surface` — extract a page's interactive surface.
+  - `web_get_evidence` — retrieve the evidence captured for a run.
+- Every web-interaction handler returns the `stdout`/`stderr`/`return_code` trio, so runs are picked up by the tamper-evident evidence chain and `tool_stats`/`session_flow` just like native tools.
+- Optional Bearer auth for the executor via `JEV_API_TOKEN` (`Authorization: Bearer <token>`).
+
+### Plan-and-approve
+- Jev's decision discipline (`choice in allowed`) is now applied to **every** tool-call before execution — a pre-execution gate plus post-execution result categorizer, with a web-executor branch that routes applicable steps through Jev.
+
+### Tooling & ops
+- New slim server image (`docker/Dockerfile.slim`) — base deps only, exposes the full tool-schema catalog over the HTTP API for local MCP-discovery repro without the Kali tool binaries (~2.6 GB).
+- `plugins/plugins.yaml`: `ssh` and `telnet` tools enabled for post-exploitation / lateral movement over MCP (remote command execution on footholds). Also shipped as a configmap override in the hades-cr chart so deployments pick it up without an image rebuild.
+
 ## 1.9.0 (2026-08-20)
 
 ### Run page

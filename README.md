@@ -95,6 +95,45 @@ NyxStrike does not just run tools — it orchestrates full attack chains using A
 
 ---
 
+## 🧠 AI Decision Engine (Router + Jev)
+
+NyxStrike chooses the next tool with a **deterministic, precision-first router** and
+escalates hard calls to [TypeSafe's System One model (**Jev**)](https://typesafe.sh)
+— a typed judgment instead of free-text prose.
+
+- **Deterministic nivel-0 router** — ranks the indexed tool candidates by
+  `effective_score` (folding in each tool's registered `effectiveness`), emits an
+  auditable `Decision(tool, confidence, reason, level, …)` and calibrates confidence
+  by margin.
+- **Jev as the escalation gate** — when deterministic confidence falls below
+  `ROUTER_CONFIDENCE_THRESHOLD` (~0.6), the router asks Jev a typed `Choice` over the
+  offered shortlist. The pick is validated against that shortlist (`choice in allowed`);
+  out-of-set, abstention, missing SDK/key, timeout or any network error all fall back to
+  the deterministic top-1 — the pipeline never blocks. Jev is a gate, not an absolute
+  decider.
+- **Jev web executor** — a `web_interaction` toolspec category (not a standalone MCP)
+  that proxies to a Jev service over HTTP. Three tools drive a browser by goal and feed
+  the tamper-evident evidence chain:
+  - `web_run_goal` — run a natural-language goal against a web target
+  - `web_extract_surface` — extract the interactive surface of a page
+  - `web_get_evidence` — retrieve the evidence captured for a run
+- **Opt-in & offline-safe** — the router is enabled per session via
+  `configure_router(session_id, enabled=True, model=make_jev_router())`; the SDK call
+  sits behind an injectable `judge_fn` so tests run fully offline and never hit a paid API.
+
+**Configuration**
+
+| Env var | Purpose |
+| --- | --- |
+| `JEV_URL` | Base URL of the Jev service, e.g. `http://jev.nyx.svc:8765` |
+| `JEV_API_TOKEN` | Optional — sent to the Jev executor as `Authorization: Bearer <token>` |
+| `TYPESAFE_API_KEY` | TypeSafe SDK key for the router's System One call |
+| `ROUTER_CONFIDENCE_THRESHOLD` | Deterministic confidence below which the router escalates to Jev (default ~0.6) |
+
+> Design notes: [`docs/superpowers/specs/2026-09-23-tool-selector-typesafe-design.md`](docs/superpowers/specs/2026-09-23-tool-selector-typesafe-design.md)
+
+---
+
 ## 🧰 Tool Arsenal
 
 200+ offensive security tools across 50+ categories — all dynamically orchestrated by AI agents in real time.

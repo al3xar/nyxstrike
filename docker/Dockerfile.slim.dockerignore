@@ -1,0 +1,7 @@
+.git
+**/node_modules
+frontend/dashboard/assets
+docker/nyxstrike-env
+**/__pycache__
+*.pyc
+output

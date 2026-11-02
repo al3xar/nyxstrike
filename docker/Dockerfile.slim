@@ -1,0 +1,22 @@
+# Slim NyxStrike SERVER image for local repro (no Kali security tools).
+# Exposes the full 185-tool schema catalog via the HTTP API so hermes MCP
+# discovery sees the real catalog; tool EXECUTION is out of scope here.
+FROM python:3.12-slim
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    ca-certificates curl git gcc build-essential libffi-dev \
+ && rm -rf /var/lib/apt/lists/*
+ENV UV_INSTALL_DIR=/usr/local/bin
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+WORKDIR /opt/nyxstrike
+COPY . .
+# Base deps only (no --extra tools = no angr/bbot/volatility). Server starts and
+# registers all ToolSpec schemas; only actual tool execution needs the binaries.
+RUN UV_PROJECT_ENVIRONMENT=/opt/nyxstrike/docker/nyxstrike-env \
+    uv sync --frozen --no-dev
+RUN cp -f nyxstrike_server.py docker/nyxstrike_server.py \
+ && cp -f nyxstrike.sh docker/nyxstrike.sh \
+ && chmod +x docker/docker-entrypoint.sh
+ENV NYXSTRIKE_HOST=0.0.0.0 NYXSTRIKE_PORT=8888
+EXPOSE 8888
+ENTRYPOINT ["/opt/nyxstrike/docker/docker-entrypoint.sh"]

@@ -28,9 +28,13 @@
 tools:
 - name: example_net_ping
   enabled: false
+# ssh + telnet enabled for post-exploitation / lateral movement over MCP
+# (remote command execution on footholds). See hades-cr nyxstrike chart, which
+# also ships this manifest as a configmap override so the deployment gets it
+# without waiting for an image rebuild.
 - name: ssh
-  enabled: false
+  enabled: true
 - name: telnet
-  enabled: false
+  enabled: true
 - name: h2csmuggler
   enabled: false
